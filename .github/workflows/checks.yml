@@ -1,0 +1,42 @@
+name: checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      native_window:
+        description: Run macOS window tests (requires an available desktop session)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        configuration: [Release, Debug]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake pkgconf md4c
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libmd4c-dev libmd4c-html0-dev libgtk-3-dev libwebkit2gtk-4.1-dev python3
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DBUILD_TESTING=ON -DMDREAD_SANITIZERS=${{ matrix.configuration == 'Debug' && 'ON' || 'OFF' }} -DMDREAD_TEST_NATIVE_WINDOW=${{ runner.os == 'macOS' && inputs.native_window && 'ON' || 'OFF' }}
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: HTTP and installer regressions
+        env:
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+      - name: Test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}-${{ matrix.configuration }}
+          path: build/Testing/Temporary/

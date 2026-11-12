@@ -1,5 +1,7 @@
 #include "web.hpp"
 #include "window.hpp"
+#include "root_files.hpp"
+#include "server_pool.hpp"
 #include "purify.hpp"
 #include "math_assets.hpp"
 #include <md4c-html.h>
@@ -18,7 +20,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -26,12 +27,25 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
+#include <mutex>
 
 namespace fs = std::filesystem;
 namespace {
 std::atomic<bool> running{true};
+bool offline_mode = false;
 static_assert(std::atomic<bool>::is_always_lock_free, "Signal handler needs a lock-free atomic");
 void stop(int) { running.store(false, std::memory_order_relaxed); }
+thread_local std::chrono::steady_clock::time_point io_deadline;
+bool wait_socket(int fd, short events) {
+    while (running && std::chrono::steady_clock::now() < io_deadline) {
+        pollfd state{fd, events, 0};
+        const auto result = ::poll(&state, 1, 50);
+        if (result > 0) return (state.revents & events) != 0;
+        if (result < 0 && errno != EINTR) return false;
+    }
+    return false;
+}
 
 struct Socket {
     int fd;
@@ -65,34 +79,44 @@ std::string json_string(std::string_view text) {
             out += hex[c >> 4];
             out += hex[c & 15];
         } else out += static_cast<char>(c);
+        if (out.size() > 8 * 1024 * 1024) throw std::runtime_error("Превышен лимит JSON-ответа — 8 MiB");
     }
     return out + '"';
 }
 
 constexpr std::size_t max_file_size = 16 * 1024 * 1024;
-std::string read_file(const fs::path& file) {
-    std::error_code ec;
-    if (!fs::is_regular_file(file, ec)) throw std::runtime_error("Файл недоступен: " + file.string());
-    std::ifstream input(file, std::ios::binary);
-    if (!input) throw std::runtime_error("Не удалось прочитать: " + file.string());
+std::string read_file(const FileHandle& file) {
+    const auto info = file.stat();
+    if (!S_ISREG(info.st_mode)) throw std::runtime_error("Ожидается обычный файл");
+    if (info.st_size > static_cast<off_t>(max_file_size)) throw std::runtime_error("Максимальный размер файла — 16 MiB");
     std::string result;
     char buffer[8192];
-    while (input.read(buffer, sizeof(buffer)) || input.gcount() > 0) {
-        result.append(buffer, static_cast<std::size_t>(input.gcount()));
+    while (running) {
+        if (std::chrono::steady_clock::now() >= io_deadline) throw std::runtime_error("Превышен срок чтения файла");
+        const auto size = ::read(file.fd, buffer, sizeof(buffer));
+        if (size == 0) return result;
+        if (size < 0 && errno == EINTR) continue;
+        if (size < 0) throw std::runtime_error("Ошибка чтения файла");
+        result.append(buffer, static_cast<std::size_t>(size));
         if (result.size() > max_file_size) throw std::runtime_error("Максимальный размер файла — 16 MiB");
     }
-    if (input.bad()) throw std::runtime_error("Ошибка чтения: " + file.string());
-    return result;
+    throw std::runtime_error("Чтение отменено");
 }
 
 std::string render(std::string_view markdown) {
-    std::string html;
+    struct Output { std::string html; std::size_t tags = 0; bool overflow = false; } output;
     auto append = [](const MD_CHAR* data, MD_SIZE size, void* target) {
-        static_cast<std::string*>(target)->append(data, size);
+        auto& out = *static_cast<Output*>(target);
+        if (out.overflow) return;
+        out.tags += static_cast<std::size_t>(std::count(data, data + size, '<'));
+        if (out.html.size() + size > 4 * 1024 * 1024 || out.tags > 40000) { out.overflow = true; return; }
+        out.html.append(data, size);
     };
-    if (md_html(markdown.data(), static_cast<MD_SIZE>(markdown.size()), append, &html,
+    if (md_html(markdown.data(), static_cast<MD_SIZE>(markdown.size()), append, &output,
                 MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS, MD_HTML_FLAG_SKIP_UTF8_BOM) != 0)
         throw std::runtime_error("Не удалось разобрать Markdown");
+    if (output.overflow) throw std::runtime_error("Документ слишком сложный: максимум 4 MiB HTML и 40000 тегов");
+    auto html = std::move(output.html);
     return html;
 }
 
@@ -106,20 +130,23 @@ void respond(int fd, int code, std::string_view type, std::string_view body,
     case 403: reason = "Forbidden"; break;
     case 404: reason = "Not Found"; break;
     case 405: reason = "Method Not Allowed"; break;
+    case 413: reason = "Content Too Large"; break;
     case 503: reason = "Service Unavailable"; break;
     }
     std::string header = "HTTP/1.1 " + std::to_string(code) + " " + reason + "\r\n"
         "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
         "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' https: http: data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n"
+        + std::string(offline_mode ? "img-src 'self' data:; " : "img-src 'self' https: http: data:; ")
+        + "font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n"
         "Referrer-Policy: no-referrer\r\nContent-Type: " + std::string(type) + "\r\n";
     if (code != 304) header += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     header += extra;
     header += "\r\n";
     for (std::string_view part : {std::string_view(header), body}) {
         while (!part.empty()) {
+            if (!wait_socket(fd, POLLOUT)) return;
             const auto n = ::send(fd, part.data(), part.size(), 0);
-            if (n < 0 && errno == EINTR && running) continue;
+            if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) && running) continue;
             if (n <= 0) return;
             part.remove_prefix(static_cast<std::size_t>(n));
         }
@@ -177,47 +204,94 @@ struct HttpError : std::runtime_error {
 struct Document {
     fs::path file;
     fs::path root;
-    std::string source;
-    std::string html;
-    std::uint64_t revision = 0;
     bool directory_mode = false;
-    fs::path cached_file;
+    std::shared_ptr<RootFiles> files;
+    struct Cached { std::string signature, body, etag; std::chrono::steady_clock::time_point verified; std::string error{}; };
+    std::mutex cache_mutex;
+    std::map<std::string, std::shared_ptr<Cached>> cache;
+    std::map<std::string, std::shared_ptr<Cached>> folders;
+
+    Document(fs::path selected, fs::path base, bool directory)
+        : file(std::move(selected)), root(std::move(base)), directory_mode(directory), files(std::make_shared<RootFiles>(root)) {}
 
     fs::path resolve(const std::string& relative) const {
-        const fs::path path(relative);
-        if (path.is_absolute()) throw HttpError(403, "Путь вне открытой директории");
-        const auto candidate = fs::weakly_canonical(root / path);
-        const auto within = candidate.lexically_relative(root);
-        if (within.empty() || within.is_absolute() || *within.begin() == "..")
-            throw HttpError(403, "Путь вне открытой директории");
-        return candidate;
+        try { return root / RootFiles::relative(relative); }
+        catch (const std::exception& error) { throw HttpError(403, error.what()); }
+    }
+    static std::string etag(std::string_view bytes) {
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (unsigned char c : bytes) { hash ^= c; hash *= 1099511628211ULL; }
+        return "\"" + std::to_string(hash) + "-" + std::to_string(bytes.size()) + "\"";
+    }
+    std::shared_ptr<Cached> reload(const std::string& relative) {
+        auto opened = files->open(relative);
+        const auto signature = file_signature(opened.stat());
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            auto found = cache.find(relative);
+            if (found != cache.end() && found->second->signature == signature
+                && now - found->second->verified < std::chrono::seconds(10)) {
+                if (!found->second->error.empty()) throw std::runtime_error(found->second->error);
+                return found->second;
+            }
+        }
+        auto source = read_file(opened);
+        const auto version = "\"" + signature + ":" + etag(source).substr(1);
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            auto found = cache.find(relative);
+            if (found != cache.end() && found->second->etag == version) {
+                auto refreshed = std::make_shared<Cached>(*found->second);
+                refreshed->signature = signature; refreshed->verified = now;
+                cache[relative] = refreshed;
+                if (!refreshed->error.empty()) throw std::runtime_error(refreshed->error);
+                return refreshed;
+            }
+        }
+        auto value = std::make_shared<Cached>(Cached{signature, {}, version, now});
+        try { value->body = "{\"html\":" + json_string(render(source)) + "}"; }
+        catch (const std::exception& error) { value->error = error.what(); }
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        std::size_t bytes = value->body.size();
+        for (const auto& item : cache) bytes += item.second->body.size();
+        if (cache.size() >= 16 || bytes > 32 * 1024 * 1024) cache.clear();
+        cache[relative] = value;
+        if (!value->error.empty()) throw std::runtime_error(value->error);
+        return value;
     }
 
-    void reload(const fs::path& selected) {
-        auto next = read_file(selected);
-        if (revision && selected == cached_file && next == source) return;
-        auto next_html = render(next);
-        cached_file = selected;
-        source = std::move(next);
-        html = std::move(next_html);
-        ++revision;
-    }
-
-    std::string listing(const std::string& relative) const {
-        const auto folder = resolve(relative);
-        if (!fs::is_directory(folder)) throw HttpError(404, "Директория недоступна");
+    std::shared_ptr<Cached> listing(const std::string& relative) {
+        resolve(relative);
+        auto opened = files->open(relative);
+        const auto info = opened.stat();
+        if (!S_ISDIR(info.st_mode)) throw HttpError(404, "Директория недоступна");
+        const auto signature = file_signature(info);
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            auto found = folders.find(relative);
+            if (found != folders.end() && found->second->signature == signature
+                && now - found->second->verified < std::chrono::seconds(10)) return found->second;
+        }
         struct Entry { std::string name, path; bool directory; };
         std::vector<Entry> entries;
-        for (const auto& entry : fs::directory_iterator(folder)) {
-            const auto name = entry.path().filename().string();
+        // openat(.) creates an independent directory offset; dup() would share it.
+        FileHandle scan(::openat(opened.fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        std::unique_ptr<DIR, decltype(&::closedir)> stream(::fdopendir(scan.fd), ::closedir);
+        if (!stream) throw HttpError(503, "Не удалось прочитать папку");
+        scan.fd = -1;
+        std::size_t scanned = 0;
+        while (auto* entry = ::readdir(stream.get())) {
+            if (!running || std::chrono::steady_clock::now() >= io_deadline) throw HttpError(503, "Перечисление папки отменено или заняло слишком долго");
+            if (++scanned > 100000 || entries.size() >= 50000) throw HttpError(413, "Слишком много файлов в папке");
+            const std::string name = entry->d_name;
             if (name.empty() || name.front() == '.') continue;
-            try {
-                const auto entry_path = fs::path(relative) / name;
-                const auto safe = resolve(entry_path.generic_string());
-                const bool directory = fs::is_directory(safe);
-                if (!directory && (!is_markdown(entry.path()) || !fs::is_regular_file(safe))) continue;
-                entries.push_back({name, entry_path.generic_string(), directory});
-            } catch (const std::exception&) { continue; }
+            struct stat st{};
+            if (::fstatat(opened.fd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            const bool directory = S_ISDIR(st.st_mode);
+            if (!directory && (!S_ISREG(st.st_mode) || !is_markdown(name))) continue;
+            entries.push_back({name, (fs::path(relative) / name).generic_string(), directory});
         }
         std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
             if (a.directory != b.directory) return a.directory > b.directory;
@@ -233,12 +307,17 @@ struct Document {
                 + ",\"directory\":" + (entry.directory ? "true" : "false")
                 + ",\"url\":" + json_string("/files/" + encode_path(entry.path) + (entry.directory ? "/" : "")) + "}";
         }
-        return result + "]}";
+        result += "]}";
+        if (result.size() > 8 * 1024 * 1024) throw HttpError(413, "Список файлов слишком велик");
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        if (folders.size() >= 8) folders.clear();
+        folders[relative] = std::make_shared<Cached>(Cached{signature, result, "\"" + signature + ":" + etag(result).substr(1), now});
+        return folders[relative];
     }
 
     void serve_page(int fd, const std::string& selected, const std::string& folder) {
         const bool reading = !directory_mode || !selected.empty();
-        if (reading) reload(directory_mode ? resolve(selected) : file);
+
         const auto root_name = root.filename().empty() ? root.string() : root.filename().string();
         const auto name = directory_mode
             ? (reading ? fs::path(selected).filename().string()
@@ -279,11 +358,13 @@ struct Document {
     }
 
     void serve(int fd, const std::string& host) {
+        io_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         std::string request;
         char buffer[2048];
         while (request.find("\r\n\r\n") == std::string::npos) {
+            if (!wait_socket(fd, POLLIN)) return;
             const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
-            if (n < 0 && errno == EINTR && running) continue;
+            if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) && running) continue;
             if (n <= 0) return;
             request.append(buffer, static_cast<std::size_t>(n));
             if (request.size() > 16384) {
@@ -340,31 +421,44 @@ struct Document {
                 try {
                     const auto relative = directory_mode ? requested_path() : "";
                     if (directory_mode && !is_markdown(relative)) throw HttpError(404, "Укажите Markdown-файл");
-                    reload(directory_mode ? resolve(relative) : file);
-                    const auto etag = "\"" + std::to_string(revision) + "\"";
+                    if (directory_mode) resolve(relative);
+                    const auto value = reload(directory_mode ? relative : file.filename().string());
+                    const auto& etag = value->etag;
                     if (headers["if-none-match"] == etag) respond(fd, 304, "application/json", "", "ETag: " + etag + "\r\n");
-                    else respond(fd, 200, "application/json; charset=utf-8", "{\"html\":" + json_string(html) + "}", "ETag: " + etag + "\r\n");
-                } catch (const HttpError&) { throw; }
+                    else respond(fd, 200, "application/json; charset=utf-8", value->body, "ETag: " + etag + "\r\n");
+                } catch (const RootFileError&) { throw; }
+                catch (const HttpError&) { throw; }
                 catch (const std::exception& error) {
                     respond(fd, 503, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
                 }
             } else if (directory_mode && target == "/__mdread/list") {
-                respond(fd, 200, "application/json; charset=utf-8", listing(requested_path()));
+                const auto value = listing(requested_path());
+                const auto& version = value->etag;
+                if (headers["if-none-match"] == version) respond(fd, 304, "application/json", "", "ETag: " + version + "\r\n");
+                else respond(fd, 200, "application/json; charset=utf-8", value->body, "ETag: " + version + "\r\n");
             } else if (directory_mode && target.rfind("/files/", 0) == 0) {
                 auto relative = decode_path(target.substr(7));
-                const auto candidate = resolve(relative);
-                if (fs::is_directory(candidate)) {
-                    relative = fs::path(relative).lexically_normal().generic_string();
-                    if (relative == ".") relative.clear();
-                    while (!relative.empty() && relative.back() == '/') relative.pop_back();
-                    serve_page(fd, "", relative);
-                } else if (is_markdown(relative) && fs::is_regular_file(candidate)) {
+                resolve(relative);
+                bool directory = false;
+                try { directory = S_ISDIR(files->open(relative).stat().st_mode); }
+                catch (const RootFileError&) { if (!is_markdown(relative)) throw; }
+                if (is_markdown(relative) && !directory) {
                     serve_page(fd, relative, fs::path(relative).parent_path().generic_string());
-                } else serve_image(fd, "/" + relative);
+                } else {
+                    auto opened = files->open(relative);
+                    if (S_ISDIR(opened.stat().st_mode)) {
+                        relative = RootFiles::relative(relative).generic_string();
+                        while (!relative.empty() && relative.back() == '/') relative.pop_back();
+                        if (relative == ".") relative.clear();
+                        serve_page(fd, "", relative);
+                    } else serve_image(fd, "/" + relative);
+                }
             } else {
                 if (directory_mode) respond(fd, 404, "text/plain", "Not found");
                 else serve_image(fd, decode_path(target));
             }
+        } catch (const RootFileError& error) {
+            respond(fd, error.code, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
         } catch (const HttpError& error) {
             respond(fd, error.code, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
         } catch (const std::exception& error) {
@@ -374,20 +468,19 @@ struct Document {
 
     void serve_image(int fd, const std::string& target) const {
         try {
-            const auto candidate = fs::canonical(root / target.substr(1));
-            const auto relative = candidate.lexically_relative(root);
-            if (relative.empty() || *relative.begin() == ".." || relative.is_absolute()) {
-                respond(fd, 403, "text/plain", "Outside document directory"); return;
-            }
+            resolve(target.substr(1));
+            const auto opened = files->open(target.substr(1));
             const std::map<std::string, std::string> types = {
                 {".png", "image/png"}, {".jpg", "image/jpeg"}, {".jpeg", "image/jpeg"},
                 {".gif", "image/gif"}, {".webp", "image/webp"}, {".svg", "image/svg+xml"},
                 {".avif", "image/avif"}, {".ico", "image/x-icon"}
             };
-            const auto type = types.find(lower(candidate.extension().string()));
+            const auto type = types.find(lower(fs::path(target).extension().string()));
             if (type == types.end()) { respond(fd, 404, "text/plain", "Not found"); return; }
-            respond(fd, 200, type->second, read_file(candidate));
-        } catch (const std::exception&) { respond(fd, 404, "text/plain", "Not found"); }
+            respond(fd, 200, type->second, read_file(opened));
+        } catch (const RootFileError& error) { respond(fd, error.code == 403 ? 403 : 404, "text/plain", "Not found"); }
+        catch (const HttpError& error) { respond(fd, error.code, "text/plain", "Not found"); }
+        catch (const std::exception&) { respond(fd, 404, "text/plain", "Not found"); }
     }
 };
 
@@ -396,6 +489,7 @@ void usage() {
                  "  По умолчанию документ открывается в отдельном окне приложения\n"
                  "  --no-window   Запустить только сервер без окна\n"
                  "  --no-browser Старое имя опции --no-window\n"
+                 "  --offline     Не загружать внешние изображения и CSS-ресурсы\n"
                  "  --port N      Порт 0–65535 (0: выбрать свободный, по умолчанию)\n"
                  "  --            Конец опций, далее путь\n"
                  "  -h, --help    Справка\n";
@@ -412,6 +506,7 @@ int main(int argc, char** argv) {
             if (options && (arg == "--help" || arg == "-h")) { usage(); return 0; }
             if (options && arg == "--") options = false;
             else if (options && (arg == "--no-window" || arg == "--no-browser")) window = false;
+            else if (options && arg == "--offline") offline_mode = true;
             else if (options && arg == "--port") {
                 if (++i == argc) throw std::runtime_error("После --port нужен номер порта");
                 const std::string number = argv[i];
@@ -430,8 +525,8 @@ int main(int argc, char** argv) {
         // Keep the requested filename: editors often save by replacing its inode.
         file = fs::absolute(file).lexically_normal();
         const bool directory = fs::is_directory(file);
-        Document doc{file, fs::canonical(directory ? file : file.parent_path()), {}, {}, 0, directory, {}};
-        if (!directory) doc.reload(file);
+        Document doc{file, fs::canonical(directory ? file : file.parent_path()), directory};
+        if (!directory && !fs::is_regular_file(file)) throw std::runtime_error("Файл недоступен");
         std::signal(SIGINT, stop);
         std::signal(SIGTERM, stop);
         std::signal(SIGPIPE, SIG_IGN);
@@ -451,18 +546,18 @@ int main(int argc, char** argv) {
         const auto url = "http://" + host + "/";
         std::cout << url << '\n' << (directory ? "Директория: " : "Файл: ") << file.string() << "\nОстановка: Ctrl+C\n" << std::flush;
         auto serve = [&] {
+            ServerPool pool([&](int fd) { doc.serve(fd, host); }, [] { running = false; });
             while (running) {
                 pollfd ready{server.fd, POLLIN, 0};
                 const int result = ::poll(&ready, 1, 200);
                 if (result < 0 && errno == EINTR) continue;
                 if (result < 0) throw std::runtime_error("Ошибка ожидания соединения");
                 if (!result || !(ready.revents & POLLIN)) continue;
-                Socket client(::accept(server.fd, nullptr, nullptr));
-                if (client.fd < 0) continue;
-                timeval timeout{1, 0};
-                ::setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-                ::setsockopt(client.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-                doc.serve(client.fd, host);
+                const int client = ::accept(server.fd, nullptr, nullptr);
+                if (client < 0) continue;
+                ::fcntl(client, F_SETFL, O_NONBLOCK);
+                ::fcntl(client, F_SETFD, FD_CLOEXEC);
+                pool.submit(client);
             }
         };
         if (!window) {
