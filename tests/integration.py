@@ -62,6 +62,51 @@ class ServerCase(unittest.TestCase):
 
 
 class ReaderTest(ServerCase):
+    def test_math_source_and_bundled_assets(self):
+        self.doc.write_text(r'''Inline $x_0 + y_0$.
+
+$$
+\begin{aligned}
+d_{\text{fwd}} &= X_{\text{rover}} - X_{\text{start}} \\
+d_{\text{left}} &= Y_{\text{rover}} - Y_{\text{start}} \\
+X_{\text{ned}} &= x_0 + d_{\text{fwd}} \cdot \cos(yaw_0) + d_{\text{left}} \cdot \sin(yaw_0) \\
+Y_{\text{ned}} &= y_0 + d_{\text{fwd}} \cdot \sin(yaw_0) - d_{\text{left}} \cdot \cos(yaw_0)
+\end{aligned}
+$$
+
+```tex
+$$not_math$$
+```
+
+Escaped price: \$100.
+''')
+        status, _, body = self.content()
+        self.assertEqual(status, 200)
+        html = json.loads(body)['html']
+        self.assertIn('<x-equation>x_0 + y_0</x-equation>', html)
+        self.assertIn('<x-equation type="display">', html)
+        self.assertIn(r'\begin{aligned}', html)
+        self.assertIn('\\\\', html)
+        self.assertEqual(html.count('<x-equation'), 2)
+        self.assertIn('$$not_math$$', html)
+        self.assertIn('Escaped price: $100.', html)
+        _, headers, page = self.request()
+        self.assertIn("font-src 'self'", headers['Content-Security-Policy'])
+        self.assertIn(b'/__mdread/katex/katex.min.js', page)
+        status, headers, css = self.request('/__mdread/katex/katex.min.css')
+        self.assertEqual(status, 200)
+        self.assertTrue(headers['Content-Type'].startswith('text/css'))
+        import re
+        fonts = set(re.findall(rb'url\((fonts/[^)]+)\)', css))
+        self.assertEqual(len(fonts), 20)
+        for font in fonts:
+            status, headers, data = self.request('/__mdread/katex/' + font.decode())
+            self.assertEqual(status, 200, font)
+            self.assertEqual(headers['Content-Type'], 'font/woff2')
+            self.assertTrue(data.startswith(b'wOF2'))
+        self.assertEqual(self.request('/__mdread/katex/../../README.md')[0], 404)
+        self.assertEqual(self.request('/__mdread/katex/missing.woff2')[0], 404)
+
     def test_render_and_page(self):
         status, headers, body = self.request()
         self.assertEqual(status, 200)

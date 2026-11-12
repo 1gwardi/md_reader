@@ -97,6 +97,12 @@ int main(int argc, char** argv) {
                 script = [[NSString stringWithUTF8String:typography_checks] stringByAppendingString:script];
             if (state->stage == -1)
                 script = [[NSString stringWithUTF8String:persisted_width_check] stringByAppendingString:script];
+            if (state->stage == 0)
+                script = [[[NSString stringWithUTF8String:math_checks]
+                    stringByAppendingString:@"if (document.fonts.status !== 'loaded') { false; } else "]
+                    stringByAppendingString:script];
+            if (state->stage == 1)
+                script = [[NSString stringWithUTF8String:updated_math_check] stringByAppendingString:script];
             [view evaluateJavaScript:script completionHandler:^(id result, NSError* error) {
                 state->pending = false;
                 // A click may replace the JavaScript context while its result is in flight.
@@ -121,6 +127,7 @@ int main(int argc, char** argv) {
                     }
                     std::ofstream output(file);
                     output << "# Updated native document\n\n";
+                    output << "Updated formula: $\\sqrt{x^2 + y^2}$.\n\n";
                     output << "<div id=\"updated-html\" style=\"color: rgb(12, 34, 56)\">Updated HTML</div>\n\n"
                               "<img src=\"missing.png\" onerror=\"window.htmlExecuted=true\">\n\n"
                               "<script>window.htmlExecuted=true</script>\n\n";

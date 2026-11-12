@@ -55,3 +55,29 @@ inline constexpr const char* typography_checks = R"JS(
     throw new Error('Reader text is too small');
 })();
 )JS";
+
+inline constexpr const char* math_checks = R"JS(
+(() => {
+  const main = document.querySelector('main');
+  if (!main.textContent.includes('Native window test')) return;
+  const display = main.querySelector('x-equation[type=display]');
+  if (!display?.querySelector('.katex-html') || display.querySelector('.katex-error'))
+    throw new Error('Aligned expression did not render');
+  if (display.querySelectorAll('mtable mtr').length !== 4)
+    throw new Error('Aligned rows were not preserved');
+  if (!main.querySelector('x-equation:not([type]) .katex'))
+    throw new Error('Inline math did not render');
+  if (!main.querySelector('.katex-error')) throw new Error('Invalid math was not shown as source');
+  if (main.querySelector('pre .katex')) throw new Error('Code example was rendered as math');
+  if (display.getBoundingClientRect().width > main.getBoundingClientRect().width)
+    throw new Error('Math overflows the document');
+  if (document.fonts.status === 'loaded' && !document.fonts.check('16px KaTeX_Main'))
+    throw new Error('Bundled math font did not load');
+})();
+)JS";
+
+inline constexpr const char* updated_math_check = R"JS(
+if (document.querySelector('main').textContent.includes('Updated native document')
+    && !document.querySelector('main x-equation .katex'))
+  throw new Error('Math did not render after saving the document');
+)JS";

@@ -6,6 +6,21 @@ import sys
 import tempfile
 
 binary, harness = sys.argv[1:]
+math_fixture = r'''
+Inline $x_0 + y_0$.
+
+$$
+\begin{aligned}
+d_{\text{fwd}} &= X_{\text{rover}} - X_{\text{start}} \\
+d_{\text{left}} &= Y_{\text{rover}} - Y_{\text{start}} \\
+X_{\text{ned}} &= x_0 + d_{\text{fwd}} \cdot \cos(yaw_0) + d_{\text{left}} \cdot \sin(yaw_0) \\
+Y_{\text{ned}} &= y_0 + d_{\text{fwd}} \cdot \sin(yaw_0) - d_{\text{left}} \cdot \cos(yaw_0)
+\end{aligned}
+$$
+
+Invalid expression: $\frac{1}{$.
+
+'''
 html_fixture = '''
 <details id="html-details"><summary>HTML details</summary><p>Hidden details body</p></details>
 
@@ -26,7 +41,7 @@ html_fixture = '''
 '''
 with tempfile.TemporaryDirectory() as directory:
     document = Path(directory) / 'native window.md'
-    document.write_text('# Native window test\n\n' + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    document.write_text('# Native window test\n\n' + math_fixture + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
     (Path(directory) / 'pixel.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24"><rect width="32" height="24"/></svg>')
     server = subprocess.Popen([binary, '--no-window', str(document)], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -45,7 +60,7 @@ with tempfile.TemporaryDirectory() as directory:
     chapters = Path(directory) / 'chapters'
     chapters.mkdir()
     nested = chapters / 'native window.md'
-    nested.write_text('# Native window test\n\n' + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    nested.write_text('# Native window test\n\n' + math_fixture + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
     (chapters / 'pixel.svg').write_text((Path(directory) / 'pixel.svg').read_text())
     (chapters / 'second.md').write_text('# Second document\n')
     server = subprocess.Popen([binary, '--no-window', directory], stdout=subprocess.PIPE,
