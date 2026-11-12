@@ -1,0 +1,4 @@
+#pragma once
+#include <string_view>
+
+inline constexpr std::string_view sanitizer_script = R"MDREAD_PURIFY(@DOMPURIFY_SOURCE@)MDREAD_PURIFY";
