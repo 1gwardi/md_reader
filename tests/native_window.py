@@ -9,6 +9,8 @@ binary, harness = sys.argv[1:]
 math_fixture = r'''
 Inline $x_0 + y_0$.
 
+Legacy indices: $d\_{\text{standoff}}$ and $\text{view\_max}\_{\text{color}}$.
+
 $$
 \begin{aligned}
 d_{\text{fwd}} &= X_{\text{rover}} - X_{\text{start}} \\

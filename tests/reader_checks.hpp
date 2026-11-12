@@ -68,6 +68,26 @@ inline constexpr const char* math_checks = R"JS(
   if (!main.querySelector('x-equation:not([type]) .katex'))
     throw new Error('Inline math did not render');
   if (!main.querySelector('.katex-error')) throw new Error('Invalid math was not shown as source');
+  const legacy = [...main.querySelectorAll('x-equation')].find(equation => equation.querySelector('annotation')?.textContent === String.raw`d_{\text{standoff}}`);
+  if (!legacy?.querySelector('msub')) throw new Error('Escaped Markdown subscript did not render as a subscript');
+  const label = [...main.querySelectorAll('x-equation')].find(equation => equation.querySelector('annotation')?.textContent === String.raw`\text{view\_max}_{\text{color}}`);
+  if (!label?.querySelector('msub') || !label.textContent.includes('view_max'))
+    throw new Error('Literal underscore in a TeX text label was changed');
+  const cases = [
+    [String.raw`x_0`, String.raw`x_0`],
+    [String.raw`d\_{\text{fwd}}`, String.raw`d_{\text{fwd}}`],
+    [String.raw`\mathbf{P}\_{\text{rover}}`, String.raw`\mathbf{P}_{\text{rover}}`],
+    [String.raw`\text{conf}\_i`, String.raw`\text{conf}_i`],
+    [String.raw`\text{rover\_map}`, String.raw`\text{rover\_map}`],
+    [String.raw`\texttt{a\_{b}}`, String.raw`\texttt{a\_{b}}`],
+    [String.raw`\operatorname{arg\_max}\_i`, String.raw`\operatorname{arg\_max}_i`],
+    [String.raw`\verb|x\_i|`, String.raw`\verb|x\_i|`],
+    [String.raw`\text{nested {a\_b} and \{c\_d\}}\_i`, String.raw`\text{nested {a\_b} and \{c\_d\}}_i`],
+    [String.raw`\begin{aligned}x\_i &= 1 \\ y\_j &= 2\end{aligned}`, String.raw`\begin{aligned}x_i &= 1 \\ y_j &= 2\end{aligned}`]
+  ];
+  for (const [source, expected] of cases) {
+    if (normalizeMathSource(source) !== expected) throw new Error('Math compatibility changed literal text or TeX syntax: ' + source);
+  }
   if (main.querySelector('pre .katex')) throw new Error('Code example was rendered as math');
   if (display.getBoundingClientRect().width > main.getBoundingClientRect().width)
     throw new Error('Math overflows the document');

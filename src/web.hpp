@@ -330,6 +330,51 @@ async function refreshListing(force) {
   }
 }
 if (directoryMode) showBreadcrumbs();
+// Some Markdown exporters escape subscript markers even inside math. Interpret
+// those as subscripts, while preserving literal underscores in TeX text groups.
+function normalizeMathSource(source) {
+  const textCommands = new Set(['text','textrm','textsf','texttt','textnormal','textbf','textit',
+    'textup','textmd','textsc','mbox','hbox','operatorname']);
+  let result = '';
+  for (let i = 0; i < source.length;) {
+    const start = i;
+    if (source[i] === '%') {
+      const end = source.indexOf('\n', i);
+      i = end < 0 ? source.length : end;
+    } else if (source[i] === '\\') {
+      ++i;
+      if (source[i] === '_' && /[\p{L}\p{N}})\]]$/u.test(result)
+          && /[{\\\p{L}\p{N}]/u.test(source[i + 1] ?? '')) {
+        result += '_'; ++i; continue;
+      }
+      const commandStart = i;
+      while (i < source.length && /[a-zA-Z]/.test(source[i])) ++i;
+      const command = source.slice(commandStart, i);
+      if (command === 'verb') {
+        if (source[i] === '*') ++i;
+        const delimiter = source[i++];
+        while (i < source.length && source[i] !== delimiter) ++i;
+        if (i < source.length) ++i;
+      } else if (textCommands.has(command)) {
+        if (source[i] === '*') ++i;
+        while (i < source.length && /\s/.test(source[i])) ++i;
+        if (source[i] === '{') {
+          let depth = 0;
+          do {
+            const char = source[i++];
+            if (char === '\\' && i < source.length) ++i;
+            else if (char === '%') {
+              while (i < source.length && source[i] !== '\n') ++i;
+            } else if (char === '{') ++depth;
+            else if (char === '}') --depth;
+          } while (i < source.length && depth > 0);
+        }
+      } else if (!command && i < source.length) ++i;
+    } else ++i;
+    result += source.slice(start, i);
+  }
+  return result;
+}
 async function refresh(force = false) {
   if (refreshing) return;
   refreshing = true;
@@ -356,7 +401,7 @@ async function refresh(force = false) {
         article.replaceChildren(content);
         for (const equation of article.querySelectorAll('x-equation')) {
           if (equation.closest('pre,code,kbd,samp')) continue;
-          const source = equation.textContent;
+          const source = normalizeMathSource(equation.textContent);
           katex.render(source, equation, {
             displayMode:equation.getAttribute('type') === 'display',
             throwOnError:false, trust:false, strict:'ignore', maxExpand:1000, maxSize:20,
