@@ -1,4 +1,4 @@
-"""Exercise the actual CLI and HTTP server, without opening a browser."""
+"""Exercise the actual CLI and HTTP server, without opening a window."""
 import http.client
 import json
 import os
@@ -26,7 +26,7 @@ class ReaderTest(unittest.TestCase):
             '| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] Готово\n\n'
             '<script>alert(1)</script>\n', encoding="utf-8")
         self.process = subprocess.Popen(
-            [BINARY, "--no-browser", str(self.doc)],
+            [BINARY, "--no-window", str(self.doc)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop)
         ready, _, _ = select.select([self.process.stdout], [], [], 5)
