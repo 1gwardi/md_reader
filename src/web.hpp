@@ -38,6 +38,8 @@ table { display:block; overflow:auto; border-collapse:collapse; }
 th,td { padding:9px 16px; border:1px solid var(--line); } th { background:var(--code); }
 hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
 input[type=checkbox] { margin-right:.5em; }
+details { margin:0 0 1.2em; padding:12px 18px; border:1px solid var(--line); border-radius:6px; }
+summary { cursor:pointer; font-weight:600; } details[open] > summary { margin-bottom:12px; }
 @media(max-width:600px) { body { font-size:16px; } header { padding:16px 20px; } main { padding:24px 20px 64px; } }
 @media(max-width:700px) { .with-explorer { padding-left:0; } #explorer { position:static; width:auto; max-height:260px; border-right:0; border-bottom:1px solid var(--line); padding:16px 20px; } }
 )CSS";
@@ -49,6 +51,9 @@ const directoryMode = document.body.dataset.directoryMode === 'true';
 const reading = document.body.dataset.reading === 'true';
 const folder = document.body.dataset.folder;
 const selected = document.body.dataset.selected;
+const explorer = document.querySelector('#explorer');
+const sidebar = document.querySelector('#files');
+const directoryList = reading ? null : article.querySelector('#directory-list');
 const contentURL = '/__mdread/content' + (directoryMode ? '?path=' + encodeURIComponent(selected) : '');
 let revision = '';
 let loaded = false;
@@ -105,11 +110,10 @@ async function refreshListing() {
   if (!response.ok) throw new Error(data.error);
   const listing = JSON.stringify(data.entries);
   if (listing !== lastListing) {
-    const sidebar = document.querySelector('#files');
-    const position = document.querySelector('#explorer').scrollTop;
+    const position = explorer.scrollTop;
     sidebar.replaceChildren(fileList(data.entries));
-    document.querySelector('#explorer').scrollTop = position;
-    document.querySelector('#directory-list')?.replaceChildren(fileList(data.entries));
+    explorer.scrollTop = position;
+    directoryList?.replaceChildren(fileList(data.entries));
     lastListing = listing;
   }
 }
@@ -126,9 +130,14 @@ async function refresh() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error);
         const position = window.scrollY;
-        article.innerHTML = data.html;
-        const usedIds = new Set();
+        const content = DOMPurify.sanitize(data.html, {
+          USE_PROFILES: {html: true}, RETURN_DOM_FRAGMENT: true,
+          FORBID_TAGS: ['style', 'link', 'meta', 'base']
+        });
+        article.replaceChildren(content);
+        const usedIds = new Set(Array.from(article.querySelectorAll('[id]'), element => element.id));
         article.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(heading => {
+          if (heading.id) return;
           const base = heading.textContent.toLowerCase().trim()
             .replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/\s/g, '-') || 'section';
           let id = base;

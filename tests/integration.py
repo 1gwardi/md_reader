@@ -71,14 +71,46 @@ class ReaderTest(ServerCase):
         html = json.loads(body)["html"]
         for fragment in ('<h1>Привет</h1>', '<strong>Жирный</strong>', '<table>', 'type="checkbox"', 'class="language-cpp"'):
             self.assertIn(fragment, html)
-        self.assertNotIn('<script>', html)
-        self.assertIn('&lt;script&gt;', html)
+        # The API carries parsed HTML; the web view sanitizes it before insertion.
+        self.assertIn('<script>', html)
+        self.assertNotIn('<script>alert(1)</script>', self.request()[2].decode())
         self.assertEqual(self.content(headers['ETag'])[0], 304)
-        for path, mime in (("style.css", "text/css"), ("app.js", "text/javascript")):
+        for path, mime in (("style.css", "text/css"), ("app.js", "text/javascript"), ("purify.js", "text/javascript")):
             status, headers, body = self.request("/__mdread/" + path)
             self.assertEqual(status, 200)
             self.assertTrue(headers["Content-Type"].startswith(mime))
             self.assertTrue(body)
+
+    def test_embedded_html_and_html_code_examples(self):
+        self.doc.write_text('''# HTML support
+
+Inline <strong>bold HTML</strong>, H<sub>2</sub>O and x<sup>2</sup>.<br>New line.
+
+<details open>
+<summary>Show details</summary>
+<p style="color: rgb(180, 30, 30)">HTML paragraph</p>
+<table><tr><th>Key</th><td>Value</td></tr></table>
+</details>
+
+<h2 id="custom-anchor">Custom anchor</h2>
+
+```html
+<strong>This is source code</strong>
+```
+''', encoding='utf-8')
+        status, _, body = self.content()
+        self.assertEqual(status, 200)
+        html = json.loads(body)['html']
+        for fragment in ('<strong>bold HTML</strong>', '<sub>2</sub>', '<sup>2</sup>',
+                         '<details open>', '<summary>Show details</summary>',
+                         'style="color: rgb(180, 30, 30)"', '<h2 id="custom-anchor">', '<th>Key</th>'):
+            self.assertIn(fragment, html)
+        self.assertIn('&lt;strong&gt;This is source code&lt;/strong&gt;', html)
+        status, headers, body = self.request()
+        self.assertEqual(status, 200)
+        self.assertIn("style-src 'self' 'unsafe-inline'", headers['Content-Security-Policy'])
+        self.assertNotIn('<details', body.decode())
+        self.assertLess(body.index(b'/__mdread/purify.js'), body.index(b'/__mdread/app.js'))
 
     def test_changes_atomic_save_and_recovery(self):
         _, headers, _ = self.content()
@@ -178,7 +210,7 @@ class DirectoryTest(ServerCase):
         self.assertEqual(nested[0]['path'], self.name)
         status, _, body = self.request(nested[0]['url'])
         self.assertEqual(status, 200)
-        self.assertIn('Nested document', body.decode())
+        self.assertIn('data-reading="true"', body.decode())
         self.assertIn('файл #1 &amp; 50%.md', body.decode())
         status, _, body = self.file_content(self.name)
         self.assertEqual(status, 200)

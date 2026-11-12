@@ -1,5 +1,6 @@
 #include "web.hpp"
 #include "window.hpp"
+#include "purify.hpp"
 #include <md4c-html.h>
 
 #include <arpa/inet.h>
@@ -89,7 +90,7 @@ std::string render(std::string_view markdown) {
         static_cast<std::string*>(target)->append(data, size);
     };
     if (md_html(markdown.data(), static_cast<MD_SIZE>(markdown.size()), append, &html,
-                MD_DIALECT_GITHUB | MD_FLAG_NOHTML, MD_HTML_FLAG_SKIP_UTF8_BOM) != 0)
+                MD_DIALECT_GITHUB, MD_HTML_FLAG_SKIP_UTF8_BOM) != 0)
         throw std::runtime_error("Не удалось разобрать Markdown");
     return html;
 }
@@ -108,8 +109,8 @@ void respond(int fd, int code, std::string_view type, std::string_view body,
     }
     std::string header = "HTTP/1.1 " + std::to_string(code) + " " + reason + "\r\n"
         "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
-        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; "
-        "img-src 'self' https: http: data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' https: http: data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n"
         "Referrer-Policy: no-referrer\r\nContent-Type: " + std::string(type) + "\r\n";
     if (code != 304) header += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     header += extra;
@@ -250,13 +251,15 @@ struct Document {
         const std::string page = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title +
             " — mdread</title><link rel=\"stylesheet\" href=\"/__mdread/style.css\">"
+            "<script defer src=\"/__mdread/purify.js\"></script>"
             "<script defer src=\"/__mdread/app.js\"></script></head><body class=\"" + (directory_mode ? "with-explorer" : "")
             + "\" data-directory-mode=\"" + (directory_mode ? "true" : "false")
             + "\" data-folder=\"" + escape_html(folder) + "\" data-selected=\"" + escape_html(selected)
             + "\" data-reading=\"" + (reading ? "true" : "false") + "\">" + explorer
             + "<header><span id=\"filename\">" + title
             + "</span><span id=\"status\" role=\"status\">Загрузка…</span></header><main>"
-            + (reading ? html : "<h1>Выберите документ</h1><p class=\"muted\">Откройте Markdown-файл или папку из списка.</p><div id=\"directory-list\"></div>")
+            // Raw document HTML is inserted only after sanitization in the web view.
+            + (reading ? "<p class=\"muted\">Загрузка документа…</p>" : "<h1>Выберите документ</h1><p class=\"muted\">Откройте Markdown-файл или папку из списка.</p><div id=\"directory-list\"></div>")
             + "</main></body></html>";
         respond(fd, 200, "text/html; charset=utf-8", page);
     }
@@ -311,6 +314,8 @@ struct Document {
                 respond(fd, 200, "text/css; charset=utf-8", stylesheet);
             } else if (target == "/__mdread/app.js") {
                 respond(fd, 200, "text/javascript; charset=utf-8", browser_script);
+            } else if (target == "/__mdread/purify.js") {
+                respond(fd, 200, "text/javascript; charset=utf-8", sanitizer_script);
             } else if (target == "/__mdread/content") {
                 try {
                     const auto relative = directory_mode ? requested_path() : "";
