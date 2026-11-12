@@ -90,6 +90,7 @@ void run_native_window(const std::string& url, const std::string& title,
         WKWebViewConfiguration* configuration = [WKWebViewConfiguration new];
         configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
         WKWebView* view = [[WKWebView alloc] initWithFrame:window.contentView.bounds configuration:configuration];
+        view.allowsBackForwardNavigationGestures = YES;
         view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         view.navigationDelegate = delegate;
         window.contentView = view;
