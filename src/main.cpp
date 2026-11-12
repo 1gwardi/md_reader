@@ -245,9 +245,15 @@ struct Document {
             : file.filename().string();
         const auto title = escape_html(name);
         const std::string explorer = directory_mode
-            ? "<aside id=\"explorer\" aria-label=\"Файлы\"><a class=\"root-link\" href=\"/\">"
-              + escape_html(root_name) + "</a><nav id=\"breadcrumbs\" aria-label=\"Путь\"></nav>"
-              "<div id=\"files\">Загрузка файлов…</div></aside>" : "";
+            ? "<aside id=\"explorer\" aria-label=\"Файлы\"><a class=\"root-link\" href=\"/\" title=\"В корень открытой папки\">"
+              "<span class=\"brand-mark\" aria-hidden=\"true\">m↓</span><span>mdread</span></a>"
+              "<div class=\"explorer-heading\"><span class=\"eyebrow\">РАБОЧАЯ ПАПКА</span><strong class=\"folder-name\">"
+              + escape_html(root_name) + "</strong></div><nav id=\"breadcrumbs\" aria-label=\"Путь\"></nav>"
+              "<label class=\"search-field\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"6\"/><path d=\"m15 15 5 5\"/></svg><input id=\"file-search\" type=\"search\" "
+              "placeholder=\"Поиск в папке\" aria-label=\"Найти файл в текущей папке\" autocomplete=\"off\"></label>"
+              "<div id=\"file-count\" class=\"list-caption\"></div><div id=\"files\">Загрузка файлов…</div>"
+              "<div class=\"explorer-hint\">" + (reading ? "Изменения появляются после сохранения" : "Выберите файл, чтобы начать чтение")
+              + "</div></aside>" : "";
         const std::string page = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title +
             " — mdread</title><link rel=\"stylesheet\" href=\"/__mdread/style.css\">"
@@ -256,11 +262,14 @@ struct Document {
             + "\" data-directory-mode=\"" + (directory_mode ? "true" : "false")
             + "\" data-folder=\"" + escape_html(folder) + "\" data-selected=\"" + escape_html(selected)
             + "\" data-reading=\"" + (reading ? "true" : "false") + "\">" + explorer
-            + "<header><span id=\"filename\">" + title
-            + "</span><span id=\"status\" role=\"status\">Загрузка…</span></header><main>"
+            + "<a class=\"skip-link\" href=\"#reader-main\">К документу</a>"
+            + std::string(toolbar_start) + "<div class=\"document-heading\"><span class=\"eyebrow\">"
+            + (reading ? "ДОКУМЕНТ" : "ОБЗОР ПАПКИ") + "</span><span id=\"filename\" title=\"" + title + "\">" + title
+            + "</span></div>" + std::string(toolbar_end)
+            + "<div id=\"notice\" role=\"status\" hidden></div><main id=\"reader-main\" tabindex=\"-1\">"
             // Raw document HTML is inserted only after sanitization in the web view.
-            + (reading ? "<p class=\"muted\">Загрузка документа…</p>" : "<h1>Выберите документ</h1><p class=\"muted\">Откройте Markdown-файл или папку из списка.</p><div id=\"directory-list\"></div>")
-            + "</main></body></html>";
+            + (reading ? "<p class=\"muted\">Загрузка документа…</p>" : "<h1>Документы</h1><p class=\"muted\">Выберите файл для чтения или откройте папку.</p><div id=\"directory-list\"></div>")
+            + "</main><button id=\"sidebar-backdrop\" aria-label=\"Закрыть список файлов\" tabindex=\"-1\" hidden></button></body></html>";
         respond(fd, 200, "text/html; charset=utf-8", page);
     }
 
