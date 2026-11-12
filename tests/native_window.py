@@ -6,9 +6,28 @@ import sys
 import tempfile
 
 binary, harness = sys.argv[1:]
+html_fixture = '''
+<details id="html-details"><summary>HTML details</summary><p>Hidden details body</p></details>
+
+<h2 id="custom-anchor">Custom HTML anchor</h2>
+
+<p id="html-styled" style="color: rgb(12, 34, 56)">Styled HTML</p>
+
+<img id="html-image" src="pixel.svg" width="32" height="24" onerror="window.htmlExecuted=true">
+
+<script>window.htmlExecuted=true</script>
+<iframe srcdoc="<script>parent.htmlExecuted=true</script>"></iframe>
+<a id="unsafe-link" href="javascript:window.htmlExecuted=true">Unsafe link</a>
+<style>header { display:none }</style>
+
+```html
+<em>HTML code example</em>
+```
+'''
 with tempfile.TemporaryDirectory() as directory:
     document = Path(directory) / 'native window.md'
-    document.write_text('# Native window test\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    document.write_text('# Native window test\n\n' + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    (Path(directory) / 'pixel.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24"><rect width="32" height="24"/></svg>')
     server = subprocess.Popen([binary, '--no-window', str(document)], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
     try:
@@ -26,7 +45,8 @@ with tempfile.TemporaryDirectory() as directory:
     chapters = Path(directory) / 'chapters'
     chapters.mkdir()
     nested = chapters / 'native window.md'
-    nested.write_text('# Native window test\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    nested.write_text('# Native window test\n\n' + html_fixture + '\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    (chapters / 'pixel.svg').write_text((Path(directory) / 'pixel.svg').read_text())
     (chapters / 'second.md').write_text('# Second document\n')
     server = subprocess.Popen([binary, '--no-window', directory], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)

@@ -41,10 +41,10 @@ int main(int argc, char** argv) {
                 script = @"(()=>{const a=document.querySelector('#files a[href=\"/files/chapters/native%20window.md\"]');if(!a)return false;a.click();return true;})()";
                 break;
             case 0:
-                script = @"(()=>{if(document.querySelector('main')?.textContent.includes('Native window test') && document.querySelector('#status')?.textContent.startsWith('Live')){scrollTo(0,300);return scrollY>200;}return false;})()";
+                script = @"(()=>{const main=document.querySelector('main');const details=main?.querySelector('#html-details');const styled=main?.querySelector('#html-styled');const img=main?.querySelector('#html-image');if(!main?.textContent.includes('Native window test') || !document.querySelector('#status')?.textContent.startsWith('Live') || !details || !styled || !img?.naturalWidth)return false;if(window.htmlExecuted || main.querySelector('script,iframe,style,[onerror]') || main.querySelector('#unsafe-link')?.hasAttribute('href'))return false;if(getComputedStyle(styled).color!=='rgb(12, 34, 56)' || !main.querySelector('h2#custom-anchor') || main.querySelector('pre code')?.textContent.trim()!=='<em>HTML code example</em>')return false;details.querySelector('summary').click();if(!details.open)return false;scrollTo(0,300);return scrollY>200;})()";
                 break;
             case 1:
-                script = @"document.querySelector('main')?.textContent.includes('Updated native document') && scrollY>200";
+                script = @"document.querySelector('main')?.textContent.includes('Updated native document') && document.querySelector('main #updated-html')?.textContent==='Updated HTML' && !window.htmlExecuted && !document.querySelector('main script, main [onerror]') && scrollY>200";
                 break;
             case 2:
                 script = @"(()=>{const a=document.querySelector('main a[href=\"second.md\"]');if(!a)return false;a.click();return true;})()";
@@ -68,7 +68,10 @@ int main(int argc, char** argv) {
                     }
                     std::ofstream output(file);
                     output << "# Updated native document\n\n";
-                    if (directory) output << "[Next document](second.md)\n\n";
+                    output << "<div id=\"updated-html\" style=\"color: rgb(12, 34, 56)\">Updated HTML</div>\n\n"
+                              "<img src=\"missing.png\" onerror=\"window.htmlExecuted=true\">\n\n"
+                              "<script>window.htmlExecuted=true</script>\n\n";
+                    if (directory) output << "<a href=\"second.md\">Next document</a>\n\n";
                     for (int i = 0; i < 100; ++i) output << "Paragraph " << i << " preserved for scrolling.\n\n";
                     if (!output) { state->failure = @"Unable to update Markdown fixture"; return; }
                     state->stage = 1;
@@ -85,6 +88,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::cout << "Native window: rendered Markdown, live update, preserved scroll, close passed\n";
+        std::cout << "HTML: details, inline styles, anchors, images, escaped code and script filtering passed\n";
         if (directory) std::cout << "Directory browser: folder click, file click, Markdown link, return to root passed\n";
     }
     return 0;
