@@ -9,6 +9,7 @@ usage() {
   --prefix ПУТЬ     Куда установить mdread (по умолчанию ~/.local)
   --build-dir ПУТЬ Каталог сборки (по умолчанию <проект>/build/macos)
   --build-only     Установить зависимости и собрать без установки mdread
+  --no-path        Не добавлять каталог установки в настройки zsh
   -h, --help       Справка
 
 Нужен macOS. Отсутствующие зависимости устанавливаются через Homebrew.
@@ -24,6 +25,7 @@ readonly project_root=${0:A:h}
 build_dir="$project_root/build/macos"
 install_prefix="$HOME/.local"
 install_binary=true
+configure_path=true
 
 while (( $# )); do
   case "$1" in
@@ -34,6 +36,7 @@ while (( $# )); do
       if [[ "$1" == --prefix ]]; then install_prefix=${2:A}; else build_dir=${2:A}; fi
       shift 2 ;;
     --build-only) install_binary=false; shift ;;
+    --no-path) configure_path=false; shift ;;
     *) fail "Неизвестная опция: $1 (см. --help)" ;;
   esac
 done
@@ -105,10 +108,31 @@ cmake --build "$build_dir" --config Release --target mdread --parallel "$jobs"
 if $install_binary; then
   step "Установка mdread в $install_prefix/bin"
   cmake --install "$build_dir" --config Release --prefix "$install_prefix"
-  print -r -- "Готово. Запуск: ${(q)install_prefix}/bin/mdread ."
-  if (( ! ${path[(Ie)$install_prefix/bin]} )); then
-    print -r -- "Для команды mdread добавьте в ~/.zshrc и выполните в текущем терминале:"
-    print -r -- "export PATH=${(q)install_prefix}/bin:\$PATH"
+  bin_dir="$install_prefix/bin"
+  if (( ${path[(Ie)$bin_dir]} )); then
+    print -r -- "Готово. Запуск из любой директории: mdread ."
+  else
+    if $configure_path; then
+      zshrc="${ZDOTDIR:-$HOME}/.zshrc"
+      [[ ! -e "$zshrc" || -f "$zshrc" ]] || fail "$zshrc должен быть обычным файлом"
+      mkdir -p "${zshrc:h}"
+      printf -v path_line 'if [[ ":$PATH:" != *:%s:* ]]; then export PATH=%s:"$PATH"; fi' \
+        "${(q)bin_dir}" "${(q)bin_dir}"
+      found=false
+      if [[ -f "$zshrc" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+          if [[ "$line" == "$path_line" ]]; then found=true; break; fi
+        done < "$zshrc"
+      fi
+      if ! $found; then
+        print -rl -- '' '# mdread: enable the installed command' "$path_line" >> "$zshrc"
+      fi
+      print -r -- "Готово. В новом терминале: mdread . (PATH настроен в $zshrc)"
+    else
+      print -r -- "Готово. Запуск: ${(q)bin_dir}/mdread ."
+    fi
+    print -r -- "Для команды mdread в текущем терминале выполните один раз:"
+    print -r -- "export PATH=${(q)bin_dir}:\"\$PATH\"; rehash"
   fi
 else
   print -r -- "Готово. Запуск: ${(q)build_dir}/mdread ."

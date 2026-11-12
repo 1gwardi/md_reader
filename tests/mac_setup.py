@@ -64,7 +64,7 @@ class SetupTest(unittest.TestCase):
             shim.chmod(0o755)
         self.log = self.root / 'commands.jsonl'
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
-                        SETUP_TEST_LOG=str(self.log))
+                        SETUP_TEST_LOG=str(self.log), ZDOTDIR=str(self.root / 'shell config'))
 
     def run_setup(self, *args, **env):
         return subprocess.run(['/bin/zsh', str(self.script), *args], env=dict(self.env, **env),
@@ -100,6 +100,49 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.calls('cmake')), 2)
         self.assertEqual(self.calls('cmake')[-1][-2:], ['--parallel', '2'])
+        self.assertFalse((self.root / 'shell config').exists())
+
+    def test_configures_zsh_without_aliases_and_preserves_existing_content(self):
+        config = self.root / 'shell config' / '.zshrc'
+        config.parent.mkdir()
+        config.write_text('# existing settings\nexport EXISTING_SETTING=kept')
+        prefix = self.root / 'installed reader'
+        for _ in range(2):
+            result = self.run_setup('--prefix', str(prefix))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        text = config.read_text()
+        self.assertTrue(text.startswith('# existing settings\nexport EXISTING_SETTING=kept\n'))
+        self.assertEqual(text.count('# mdread:'), 1)
+        self.assertNotIn('alias ', text)
+        binary = prefix / 'bin' / 'mdread'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('#!/bin/zsh\nprint -r -- installed-mdread\n')
+        binary.chmod(0o755)
+        check = subprocess.run(['/bin/zsh', '-fic',
+                                'source "$ZDOTDIR/.zshrc"; source "$ZDOTDIR/.zshrc"; mdread; print -rl -- $path'],
+                               env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout.splitlines()[0], 'installed-mdread')
+        self.assertEqual(check.stdout.splitlines().count(str(binary.parent)), 1)
+
+    def test_path_with_shell_characters_is_literal(self):
+        prefix = self.root / 'reader $literal; `literal` [1]'
+        result = self.run_setup('--prefix', str(prefix))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        check = subprocess.run(['/bin/zsh', '-fc', 'source "$ZDOTDIR/.zshrc"; print -rl -- $path'],
+                               env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn(str(prefix / 'bin'), check.stdout.splitlines())
+
+    def test_existing_path_and_no_path_option_do_not_modify_config(self):
+        prefix = self.root / 'installed'
+        result = self.run_setup('--prefix', str(prefix), PATH=str(prefix / 'bin') + os.pathsep + self.env['PATH'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('mdread .', result.stdout)
+        self.assertFalse((self.root / 'shell config').exists())
+        result = self.run_setup('--prefix', str(prefix), '--no-path')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / 'shell config').exists())
 
     def test_missing_command_line_tools_stops_before_homebrew(self):
         result = self.run_setup(SETUP_TEST_NO_CLT='1')
