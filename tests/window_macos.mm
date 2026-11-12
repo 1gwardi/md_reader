@@ -89,6 +89,8 @@ int main(int argc, char** argv) {
             }
             if (state->stage == -5)
                 script = [[NSString stringWithUTF8String:resize_checks] stringByAppendingString:script];
+            if (state->stage == -5 || state->stage == 6)
+                script = [[NSString stringWithUTF8String:typography_checks] stringByAppendingString:script];
             if (state->stage == -1)
                 script = [[NSString stringWithUTF8String:persisted_width_check] stringByAppendingString:script];
             [view evaluateJavaScript:script completionHandler:^(id result, NSError* error) {
