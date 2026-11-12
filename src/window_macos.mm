@@ -30,12 +30,12 @@
     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     (void)webView;
     NSURL* url = action.request.URL;
-    const BOOL document = [url.scheme isEqualToString:self.documentURL.scheme]
+    const BOOL local = [url.scheme isEqualToString:self.documentURL.scheme]
         && [url.host isEqualToString:self.documentURL.host]
-        && [url.port isEqual:self.documentURL.port]
-        && [url.path isEqualToString:self.documentURL.path];
-    if (document) {
-        decisionHandler(WKNavigationActionPolicyAllow);
+        && [url.port isEqual:self.documentURL.port];
+    if (local) {
+        const BOOL document = [url.path isEqualToString:@"/"] || [url.path hasPrefix:@"/files/"];
+        decisionHandler(document ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
         return;
     }
     // External links leave the reader available at the current document.
@@ -45,6 +45,10 @@
         [NSWorkspace.sharedWorkspace openURL:url];
     }
     decisionHandler(WKNavigationActionPolicyCancel);
+}
+- (void)webView:(WKWebView*)webView didFinishNavigation:(WKNavigation*)navigation {
+    (void)navigation;
+    if (webView.title.length) webView.window.title = webView.title;
 }
 @end
 

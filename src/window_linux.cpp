@@ -18,10 +18,12 @@ gboolean navigation(WebKitWebView*, WebKitPolicyDecision* decision,
     auto* action = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(decision));
     const char* uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
     const std::string target = uri ? uri : "";
-    if (target == state->url || target.rfind(state->url + "#", 0) == 0) {
+    const bool local = target.rfind(state->url, 0) == 0;
+    if (target == state->url || target.rfind(state->url + "#", 0) == 0
+        || target.rfind(state->url + "files/", 0) == 0) {
         webkit_policy_decision_use(decision);
     } else {
-        if (webkit_navigation_action_get_navigation_type(action) == WEBKIT_NAVIGATION_TYPE_LINK_CLICKED
+        if (!local && webkit_navigation_action_get_navigation_type(action) == WEBKIT_NAVIGATION_TYPE_LINK_CLICKED
             && (target.rfind("https://", 0) == 0 || target.rfind("http://", 0) == 0 || target.rfind("mailto:", 0) == 0)) {
             GError* error = nullptr;
             g_app_info_launch_default_for_uri(target.c_str(), nullptr, &error);
@@ -45,6 +47,10 @@ void run_native_window(const std::string& url, const std::string& title,
     g_object_unref(context);
     gtk_container_add(GTK_CONTAINER(window), view);
     g_signal_connect(view, "decide-policy", G_CALLBACK(navigation), &state);
+    g_signal_connect(view, "notify::title", G_CALLBACK(+[](WebKitWebView* view, GParamSpec*, gpointer data) {
+        const char* title = webkit_web_view_get_title(view);
+        if (title) gtk_window_set_title(GTK_WINDOW(data), title);
+    }), window);
     const auto close_handler = g_signal_connect(window, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean {
         gtk_main_quit();
         return TRUE;

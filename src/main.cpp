@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace {
@@ -150,20 +151,114 @@ std::string decode_path(std::string_view value) {
     return result;
 }
 
+std::string encode_path(std::string_view value) {
+    constexpr char hex[] = "0123456789ABCDEF";
+    std::string result;
+    for (unsigned char c : value) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '_' || c == '.' || c == '~' || c == '/') result += static_cast<char>(c);
+        else { result += '%'; result += hex[c >> 4]; result += hex[c & 15]; }
+    }
+    return result;
+}
+
+bool is_markdown(const fs::path& path) {
+    const auto extension = lower(path.extension().string());
+    return extension == ".md" || extension == ".markdown";
+}
+
+struct HttpError : std::runtime_error {
+    int code;
+    HttpError(int status, const std::string& message) : std::runtime_error(message), code(status) {}
+};
+
 struct Document {
     fs::path file;
     fs::path root;
     std::string source;
     std::string html;
     std::uint64_t revision = 0;
+    bool directory_mode = false;
+    fs::path cached_file;
 
-    void reload() {
-        auto next = read_file(file);
-        if (revision && next == source) return;
+    fs::path resolve(const std::string& relative) const {
+        const fs::path path(relative);
+        if (path.is_absolute()) throw HttpError(403, "Путь вне открытой директории");
+        const auto candidate = fs::weakly_canonical(root / path);
+        const auto within = candidate.lexically_relative(root);
+        if (within.empty() || within.is_absolute() || *within.begin() == "..")
+            throw HttpError(403, "Путь вне открытой директории");
+        return candidate;
+    }
+
+    void reload(const fs::path& selected) {
+        auto next = read_file(selected);
+        if (revision && selected == cached_file && next == source) return;
         auto next_html = render(next);
+        cached_file = selected;
         source = std::move(next);
         html = std::move(next_html);
         ++revision;
+    }
+
+    std::string listing(const std::string& relative) const {
+        const auto folder = resolve(relative);
+        if (!fs::is_directory(folder)) throw HttpError(404, "Директория недоступна");
+        struct Entry { std::string name, path; bool directory; };
+        std::vector<Entry> entries;
+        for (const auto& entry : fs::directory_iterator(folder)) {
+            const auto name = entry.path().filename().string();
+            if (name.empty() || name.front() == '.') continue;
+            try {
+                const auto entry_path = fs::path(relative) / name;
+                const auto safe = resolve(entry_path.generic_string());
+                const bool directory = fs::is_directory(safe);
+                if (!directory && (!is_markdown(entry.path()) || !fs::is_regular_file(safe))) continue;
+                entries.push_back({name, entry_path.generic_string(), directory});
+            } catch (const std::exception&) { continue; }
+        }
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+            if (a.directory != b.directory) return a.directory > b.directory;
+            const auto left = lower(a.name), right = lower(b.name);
+            return left == right ? a.name < b.name : left < right;
+        });
+        std::string result = "{\"entries\":[";
+        bool first = true;
+        for (const auto& entry : entries) {
+            if (!first) result += ',';
+            first = false;
+            result += "{\"name\":" + json_string(entry.name) + ",\"path\":" + json_string(entry.path)
+                + ",\"directory\":" + (entry.directory ? "true" : "false")
+                + ",\"url\":" + json_string("/files/" + encode_path(entry.path) + (entry.directory ? "/" : "")) + "}";
+        }
+        return result + "]}";
+    }
+
+    void serve_page(int fd, const std::string& selected, const std::string& folder) {
+        const bool reading = !directory_mode || !selected.empty();
+        if (reading) reload(directory_mode ? resolve(selected) : file);
+        const auto root_name = root.filename().empty() ? root.string() : root.filename().string();
+        const auto name = directory_mode
+            ? (reading ? fs::path(selected).filename().string()
+                       : (folder.empty() ? root_name : fs::path(folder).filename().string()))
+            : file.filename().string();
+        const auto title = escape_html(name);
+        const std::string explorer = directory_mode
+            ? "<aside id=\"explorer\" aria-label=\"Файлы\"><a class=\"root-link\" href=\"/\">"
+              + escape_html(root_name) + "</a><nav id=\"breadcrumbs\" aria-label=\"Путь\"></nav>"
+              "<div id=\"files\">Загрузка файлов…</div></aside>" : "";
+        const std::string page = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title +
+            " — mdread</title><link rel=\"stylesheet\" href=\"/__mdread/style.css\">"
+            "<script defer src=\"/__mdread/app.js\"></script></head><body class=\"" + (directory_mode ? "with-explorer" : "")
+            + "\" data-directory-mode=\"" + (directory_mode ? "true" : "false")
+            + "\" data-folder=\"" + escape_html(folder) + "\" data-selected=\"" + escape_html(selected)
+            + "\" data-reading=\"" + (reading ? "true" : "false") + "\">" + explorer
+            + "<header><span id=\"filename\">" + title
+            + "</span><span id=\"status\" role=\"status\">Загрузка…</span></header><main>"
+            + (reading ? html : "<h1>Выберите документ</h1><p class=\"muted\">Откройте Markdown-файл или папку из списка.</p><div id=\"directory-list\"></div>")
+            + "</main></body></html>";
+        respond(fd, 200, "text/html; charset=utf-8", page);
     }
 
     void serve(int fd, const std::string& host) {
@@ -201,38 +296,60 @@ struct Document {
         if (version != "HTTP/1.1" || target.empty() || target.front() != '/') {
             respond(fd, 400, "text/plain", "Invalid request"); return;
         }
-        target = target.substr(0, target.find('?'));
-        if (target == "/") {
-            const auto title = escape_html(file.filename().string());
-            const std::string page = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
-                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title +
-                " — mdread</title><link rel=\"stylesheet\" href=\"/__mdread/style.css\">"
-                "<script defer src=\"/__mdread/app.js\"></script></head><body><header><span id=\"filename\">" +
-                title + "</span><span id=\"status\" role=\"status\">Загрузка…</span></header>"
-                "<main>" + html + "</main></body></html>";
-            respond(fd, 200, "text/html; charset=utf-8", page);
-        } else if (target == "/__mdread/style.css") {
-            respond(fd, 200, "text/css; charset=utf-8", stylesheet);
-        } else if (target == "/__mdread/app.js") {
-            respond(fd, 200, "text/javascript; charset=utf-8", browser_script);
-        } else if (target == "/__mdread/content") {
-            try {
-                reload();
-                const auto etag = "\"" + std::to_string(revision) + "\"";
-                if (headers["if-none-match"] == etag) respond(fd, 304, "application/json", "", "ETag: " + etag + "\r\n");
-                else respond(fd, 200, "application/json; charset=utf-8", "{\"html\":" + json_string(html) + "}", "ETag: " + etag + "\r\n");
-            } catch (const std::exception& error) {
-                respond(fd, 503, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
+        const auto query_start = target.find('?');
+        const auto query = query_start == std::string::npos ? "" : target.substr(query_start + 1);
+        target = target.substr(0, query_start);
+        auto requested_path = [&]() -> std::string {
+            if (query.empty()) return "";
+            if (query.rfind("path=", 0) != 0) throw HttpError(400, "Некорректный запрос");
+            return decode_path(query.substr(5));
+        };
+        try {
+            if (target == "/") {
+                serve_page(fd, "", "");
+            } else if (target == "/__mdread/style.css") {
+                respond(fd, 200, "text/css; charset=utf-8", stylesheet);
+            } else if (target == "/__mdread/app.js") {
+                respond(fd, 200, "text/javascript; charset=utf-8", browser_script);
+            } else if (target == "/__mdread/content") {
+                try {
+                    const auto relative = directory_mode ? requested_path() : "";
+                    if (directory_mode && !is_markdown(relative)) throw HttpError(404, "Укажите Markdown-файл");
+                    reload(directory_mode ? resolve(relative) : file);
+                    const auto etag = "\"" + std::to_string(revision) + "\"";
+                    if (headers["if-none-match"] == etag) respond(fd, 304, "application/json", "", "ETag: " + etag + "\r\n");
+                    else respond(fd, 200, "application/json; charset=utf-8", "{\"html\":" + json_string(html) + "}", "ETag: " + etag + "\r\n");
+                } catch (const HttpError&) { throw; }
+                catch (const std::exception& error) {
+                    respond(fd, 503, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
+                }
+            } else if (directory_mode && target == "/__mdread/list") {
+                respond(fd, 200, "application/json; charset=utf-8", listing(requested_path()));
+            } else if (directory_mode && target.rfind("/files/", 0) == 0) {
+                auto relative = decode_path(target.substr(7));
+                const auto candidate = resolve(relative);
+                if (fs::is_directory(candidate)) {
+                    relative = fs::path(relative).lexically_normal().generic_string();
+                    if (relative == ".") relative.clear();
+                    while (!relative.empty() && relative.back() == '/') relative.pop_back();
+                    serve_page(fd, "", relative);
+                } else if (is_markdown(relative) && fs::is_regular_file(candidate)) {
+                    serve_page(fd, relative, fs::path(relative).parent_path().generic_string());
+                } else serve_image(fd, "/" + relative);
+            } else {
+                if (directory_mode) respond(fd, 404, "text/plain", "Not found");
+                else serve_image(fd, decode_path(target));
             }
-        } else {
-            serve_image(fd, target);
+        } catch (const HttpError& error) {
+            respond(fd, error.code, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
+        } catch (const std::exception& error) {
+            respond(fd, 404, "application/json; charset=utf-8", "{\"error\":" + json_string(error.what()) + "}");
         }
     }
 
     void serve_image(int fd, const std::string& target) const {
         try {
-            const auto decoded = decode_path(target);
-            const auto candidate = fs::canonical(root / decoded.substr(1));
+            const auto candidate = fs::canonical(root / target.substr(1));
             const auto relative = candidate.lexically_relative(root);
             if (relative.empty() || *relative.begin() == ".." || relative.is_absolute()) {
                 respond(fd, 403, "text/plain", "Outside document directory"); return;
@@ -250,12 +367,12 @@ struct Document {
 };
 
 void usage() {
-    std::cout << "Использование: mdread [--no-window] [--port N] <файл.md>\n"
+    std::cout << "Использование: mdread [--no-window] [--port N] <файл.md | директория>\n"
                  "  По умолчанию документ открывается в отдельном окне приложения\n"
                  "  --no-window   Запустить только сервер без окна\n"
                  "  --no-browser Старое имя опции --no-window\n"
                  "  --port N      Порт 0–65535 (0: выбрать свободный, по умолчанию)\n"
-                 "  --            Конец опций, далее имя файла\n"
+                 "  --            Конец опций, далее путь\n"
                  "  -h, --help    Справка\n";
 }
 } // namespace
@@ -280,15 +397,16 @@ int main(int argc, char** argv) {
             } else if (options && !arg.empty() && arg.front() == '-') {
                 throw std::runtime_error("Неизвестная опция: " + arg);
             } else {
-                if (!file.empty()) throw std::runtime_error("Укажите один Markdown-файл");
+                if (!file.empty()) throw std::runtime_error("Укажите один файл или директорию");
                 file = arg;
             }
         }
         if (file.empty()) { usage(); return 1; }
         // Keep the requested filename: editors often save by replacing its inode.
         file = fs::absolute(file).lexically_normal();
-        Document doc{file, fs::canonical(file.parent_path()), {}, {}, 0};
-        doc.reload();
+        const bool directory = fs::is_directory(file);
+        Document doc{file, fs::canonical(directory ? file : file.parent_path()), {}, {}, 0, directory, {}};
+        if (!directory) doc.reload(file);
         std::signal(SIGINT, stop);
         std::signal(SIGTERM, stop);
         std::signal(SIGPIPE, SIG_IGN);
@@ -306,7 +424,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Не удалось определить порт");
         const std::string host = "127.0.0.1:" + std::to_string(ntohs(address.sin_port));
         const auto url = "http://" + host + "/";
-        std::cout << url << '\n' << "Файл: " << file.string() << "\nОстановка: Ctrl+C\n" << std::flush;
+        std::cout << url << '\n' << (directory ? "Директория: " : "Файл: ") << file.string() << "\nОстановка: Ctrl+C\n" << std::flush;
         auto serve = [&] {
             while (running) {
                 pollfd ready{server.fd, POLLIN, 0};

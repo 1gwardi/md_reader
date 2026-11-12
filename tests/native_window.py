@@ -23,6 +23,25 @@ with tempfile.TemporaryDirectory() as directory:
         server.terminate()
         server.communicate(timeout=5)
 
+    chapters = Path(directory) / 'chapters'
+    chapters.mkdir()
+    nested = chapters / 'native window.md'
+    nested.write_text('# Native window test\n\n' + 'Paragraph for scrolling.\n\n' * 100)
+    (chapters / 'second.md').write_text('# Second document\n')
+    server = subprocess.Popen([binary, '--no-window', directory], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        ready, _, _ = select.select([server.stdout], [], [], 5)
+        if not ready:
+            raise RuntimeError('Directory server did not start')
+        url = server.stdout.readline().strip()
+        if not url.startswith('http://127.0.0.1:'):
+            raise RuntimeError(server.stderr.read())
+        subprocess.run([harness, url, str(nested), 'directory'], check=True, timeout=25)
+    finally:
+        server.terminate()
+        server.communicate(timeout=5)
+
     # Exercise the CLI's GUI + server lifecycle together, including Ctrl+C.
     import signal
     app = subprocess.Popen([binary, str(document)], stdout=subprocess.PIPE,
