@@ -57,6 +57,12 @@ body:not(.with-explorer) .directory-control { display:none; }
 body:not(.with-explorer) .toolbar-navigation { display:none; }
 #explorer { position:fixed; inset:0 auto 0 0; width:var(--sidebar-width); padding:0 16px 24px; overflow-y:auto; background:var(--sidebar); border-right:1px solid var(--line); font-size:13px; }
 .sidebar-hidden #explorer { visibility:hidden; }
+#sidebar-resizer { position:fixed; top:0; bottom:0; left:calc(var(--sidebar-width) - 4px); width:8px; z-index:35; cursor:col-resize; touch-action:none; }
+#sidebar-resizer::after { content:''; display:block; width:2px; height:100%; margin:auto; background:transparent; }
+#sidebar-resizer:hover::after,#sidebar-resizer:focus-visible::after,body.resizing-sidebar #sidebar-resizer::after { background:var(--accent); }
+.sidebar-hidden #sidebar-resizer { display:none; }
+body.resizing-sidebar,body.resizing-sidebar * { cursor:col-resize !important; user-select:none !important; }
+.compact-toolbar #status { display:none; }
 .root-link { display:flex; align-items:center; gap:10px; height:76px; padding:0 8px; margin-bottom:25px; color:var(--fg); font-size:17px; font-weight:650; letter-spacing:-.04em; text-decoration:none; }
 .brand-mark { display:flex; align-items:center; justify-content:center; width:29px; height:29px; border-radius:8px; background:var(--fg); color:var(--surface); font-size:16px; font-weight:650; letter-spacing:-.07em; }
 .explorer-heading { display:flex; flex-direction:column; gap:4px; padding:0 10px; }
@@ -103,7 +109,7 @@ details { margin:0 0 1.2em; padding:12px 18px; border:1px solid var(--line); bor
 @media(min-width:761px) { #sidebar-backdrop { display:none !important; } }
 @media(max-width:1100px) { main { margin:24px; } .app-toolbar { gap:10px; padding:14px 18px; } }
 @media(max-width:900px) { #status { display:none; } }
-@media(max-width:760px) { .with-explorer { padding-left:0; } #explorer { top:76px; z-index:30; width:270px; box-shadow:8px 0 30px #0001; } .root-link { height:60px; margin-bottom:12px; } #sidebar-backdrop { display:block; position:fixed; inset:76px 0 0; z-index:25; border:0; background:#0004; } .app-toolbar { padding:12px; gap:8px; } .toolbar-navigation { gap:0; } .navigation-pair { display:none; } .action-button span { display:none; } .action-button { width:32px; padding:0; } .toolbar-actions { gap:0; } #filename { font-size:12px; } main { margin:16px 12px 32px; padding:28px 22px 40px; font-size:15px; } body[data-reading=false] main { padding:24px 10px; } #notice { margin:12px; } }
+@media(max-width:760px) { .with-explorer { padding-left:0; } #explorer { top:76px; z-index:30; width:var(--sidebar-width); box-shadow:8px 0 30px #0001; } #sidebar-resizer { top:76px; } .root-link { height:60px; margin-bottom:12px; } #sidebar-backdrop { display:block; position:fixed; inset:76px 0 0; z-index:25; border:0; background:#0004; } .app-toolbar { padding:12px; gap:8px; } .toolbar-navigation { gap:0; } .navigation-pair { display:none; } .action-button span { display:none; } .action-button { width:32px; padding:0; } .toolbar-actions { gap:0; } #filename { font-size:12px; } main { margin:16px 12px 32px; padding:28px 22px 40px; font-size:15px; } body[data-reading=false] main { padding:24px 10px; } #notice { margin:12px; } }
 @media(prefers-reduced-motion:no-preference) { .icon-button,.action-button,.file-list a { transition:background .12s,color .12s; } button.is-refreshing svg { animation:spin 1s linear infinite; } @keyframes spin { to { transform:rotate(360deg); } } }
 )CSS";
 
@@ -142,6 +148,23 @@ function setSidebar(hidden) {
   toggleFiles.setAttribute('aria-label', toggleFiles.title);
   backdrop.hidden = hidden || !matchMedia('(max-width:760px)').matches;
   saveSetting('sidebar-hidden', String(hidden));
+  updateToolbarDensity();
+}
+let sidebarWidth = Number(readSetting('sidebar-width')) || 250;
+function sidebarWidthLimit() { return Math.max(190, Math.min(480, innerWidth - (innerWidth <= 760 ? 48 : 460))); }
+function updateToolbarDensity() {
+  const visible = directoryMode && !document.body.classList.contains('sidebar-hidden') && innerWidth > 760;
+  document.body.classList.toggle('compact-toolbar', innerWidth - (visible ? sidebarWidth : 0) < 620);
+}
+function applySidebarWidth(value, save = false) {
+  sidebarWidth = Math.round(Math.max(190, Math.min(sidebarWidthLimit(), value)));
+  document.documentElement.style.setProperty('--sidebar-width', sidebarWidth + 'px');
+  const resizer = document.querySelector('#sidebar-resizer');
+  resizer.setAttribute('aria-valuemin', '190');
+  resizer.setAttribute('aria-valuemax', String(sidebarWidthLimit()));
+  resizer.setAttribute('aria-valuenow', String(sidebarWidth));
+  if (save) saveSetting('sidebar-width', String(sidebarWidth));
+  updateToolbarDensity();
 }
 function updateHistoryButtons() {
   const index = history.state?.mdreadIndex ?? 0;
@@ -151,6 +174,34 @@ function updateHistoryButtons() {
 }
 function folderURL(path) { return path ? '/files/' + path.split('/').map(encodeURIComponent).join('/') + '/' : '/'; }
 if (directoryMode) {
+  applySidebarWidth(sidebarWidth);
+  const resizer = document.querySelector('#sidebar-resizer');
+  let drag = null;
+  resizer.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    drag = {id:event.pointerId, x:event.clientX, width:sidebarWidth};
+    try { resizer.setPointerCapture(event.pointerId); } catch {}
+    document.body.classList.add('resizing-sidebar');
+  });
+  window.addEventListener('pointermove', event => {
+    if (drag && event.pointerId === drag.id) applySidebarWidth(drag.width + event.clientX - drag.x);
+  });
+  function finishResize(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    drag = null;
+    document.body.classList.remove('resizing-sidebar');
+    saveSetting('sidebar-width', String(sidebarWidth));
+  }
+  window.addEventListener('pointerup', finishResize);
+  window.addEventListener('pointercancel', finishResize);
+  resizer.addEventListener('lostpointercapture', finishResize);
+  resizer.addEventListener('dblclick', () => applySidebarWidth(250, true));
+  resizer.addEventListener('keydown', event => {
+    const value = {ArrowLeft:sidebarWidth - 10, ArrowRight:sidebarWidth + 10, Home:190, End:sidebarWidthLimit()}[event.key];
+    if (value !== undefined) { event.preventDefault(); applySidebarWidth(value, true); }
+  });
+  window.addEventListener('resize', () => applySidebarWidth(sidebarWidth));
   if (typeof history.state?.mdreadIndex !== 'number') {
     const index = Number(readSetting('nav-index') ?? -1) + 1;
     history.replaceState({mdreadIndex:index}, '');

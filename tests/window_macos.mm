@@ -1,4 +1,5 @@
 #include "window.hpp"
+#include "reader_checks.hpp"
 
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
@@ -86,6 +87,10 @@ int main(int argc, char** argv) {
             default:
                 script = @"document.querySelector('#directory-list')?.textContent.includes('chapters')";
             }
+            if (state->stage == -5)
+                script = [[NSString stringWithUTF8String:resize_checks] stringByAppendingString:script];
+            if (state->stage == -1)
+                script = [[NSString stringWithUTF8String:persisted_width_check] stringByAppendingString:script];
             [view evaluateJavaScript:script completionHandler:^(id result, NSError* error) {
                 state->pending = false;
                 // A click may replace the JavaScript context while its result is in flight.

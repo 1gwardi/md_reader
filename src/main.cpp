@@ -253,7 +253,9 @@ struct Document {
               "placeholder=\"Поиск в папке\" aria-label=\"Найти файл в текущей папке\" autocomplete=\"off\"></label>"
               "<div id=\"file-count\" class=\"list-caption\"></div><div id=\"files\">Загрузка файлов…</div>"
               "<div class=\"explorer-hint\">" + (reading ? "Изменения появляются после сохранения" : "Выберите файл, чтобы начать чтение")
-              + "</div></aside>" : "";
+              + "</div></aside><div id=\"sidebar-resizer\" role=\"separator\" aria-label=\"Ширина списка файлов\" "
+                "aria-orientation=\"vertical\" aria-controls=\"explorer\" tabindex=\"0\" "
+                "title=\"Потяните для изменения ширины. Двойной щелчок — сброс\"></div>" : "";
         const std::string page = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title +
             " — mdread</title><link rel=\"stylesheet\" href=\"/__mdread/style.css\">"
