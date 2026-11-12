@@ -40,6 +40,10 @@ macOS (Homebrew):
 
 ```sh
 brew install cmake md4c
+```
+Сборка на вашей машине: 
+
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/mdread examples/demo.md
