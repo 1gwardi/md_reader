@@ -105,6 +105,9 @@ hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
 input[type=checkbox] { margin-right:.5em; }
 details { margin:0 0 1.2em; padding:12px 18px; border:1px solid var(--line); border-radius:6px; } summary { cursor:pointer; font-weight:600; } details[open] > summary { margin-bottom:12px; }
 .muted { color:var(--muted); }
+x-equation[type=display] { display:block; max-width:100%; overflow-x:auto; padding:.25em 0; }
+x-equation:not([type=display]) { white-space:normal; }
+.katex-display { margin:1em 0; }
 .skip-link { position:fixed; top:-100px; left:20px; z-index:100; padding:8px 14px; border-radius:6px; background:var(--surface); } .skip-link:focus { top:12px; }
 @media(min-width:761px) { #sidebar-backdrop { display:none !important; } }
 @media(max-width:1100px) { main { margin:24px; } .app-toolbar { gap:10px; padding:14px 18px; } }
@@ -347,9 +350,19 @@ async function refresh(force = false) {
         const position = window.scrollY;
         const content = DOMPurify.sanitize(data.html, {
           USE_PROFILES: {html: true}, RETURN_DOM_FRAGMENT: true,
+          ADD_TAGS: ['x-equation'],
           FORBID_TAGS: ['style', 'link', 'meta', 'base']
         });
         article.replaceChildren(content);
+        for (const equation of article.querySelectorAll('x-equation')) {
+          if (equation.closest('pre,code,kbd,samp')) continue;
+          const source = equation.textContent;
+          katex.render(source, equation, {
+            displayMode:equation.getAttribute('type') === 'display',
+            throwOnError:false, trust:false, strict:'ignore', maxExpand:1000, maxSize:20,
+            errorColor:'#b54c42'
+          });
+        }
         const usedIds = new Set(Array.from(article.querySelectorAll('[id]'), element => element.id));
         article.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(heading => {
           if (heading.id) return;
