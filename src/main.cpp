@@ -1,19 +1,20 @@
 #include "web.hpp"
+#include "window.hpp"
 #include <md4c-html.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <spawn.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,12 +22,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
-extern char** environ;
 namespace fs = std::filesystem;
 namespace {
-volatile std::sig_atomic_t running = 1;
-void stop(int) { running = 0; }
+std::atomic<bool> running{true};
+static_assert(std::atomic<bool>::is_always_lock_free, "Signal handler needs a lock-free atomic");
+void stop(int) { running.store(false, std::memory_order_relaxed); }
 
 struct Socket {
     int fd;
@@ -247,21 +249,11 @@ struct Document {
     }
 };
 
-pid_t open_browser(const std::string& url) {
-#ifdef __APPLE__
-    const char* opener = "open";
-#else
-    const char* opener = "xdg-open";
-#endif
-    char* args[] = {const_cast<char*>(opener), const_cast<char*>(url.c_str()), nullptr};
-    pid_t child;
-    if (posix_spawnp(&child, opener, nullptr, nullptr, args, environ) != 0) return -1;
-    return child;
-}
-
 void usage() {
-    std::cout << "Использование: mdread [--no-browser] [--port N] <файл.md>\n"
-                 "  --no-browser  Только вывести URL\n"
+    std::cout << "Использование: mdread [--no-window] [--port N] <файл.md>\n"
+                 "  По умолчанию документ открывается в отдельном окне приложения\n"
+                 "  --no-window   Запустить только сервер без окна\n"
+                 "  --no-browser Старое имя опции --no-window\n"
                  "  --port N      Порт 0–65535 (0: выбрать свободный, по умолчанию)\n"
                  "  --            Конец опций, далее имя файла\n"
                  "  -h, --help    Справка\n";
@@ -270,14 +262,14 @@ void usage() {
 
 int main(int argc, char** argv) {
     try {
-        bool browser = true, options = true;
+        bool window = true, options = true;
         unsigned port = 0;
         fs::path file;
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (options && (arg == "--help" || arg == "-h")) { usage(); return 0; }
             if (options && arg == "--") options = false;
-            else if (options && arg == "--no-browser") browser = false;
+            else if (options && (arg == "--no-window" || arg == "--no-browser")) window = false;
             else if (options && arg == "--port") {
                 if (++i == argc) throw std::runtime_error("После --port нужен номер порта");
                 const std::string number = argv[i];
@@ -315,28 +307,39 @@ int main(int argc, char** argv) {
         const std::string host = "127.0.0.1:" + std::to_string(ntohs(address.sin_port));
         const auto url = "http://" + host + "/";
         std::cout << url << '\n' << "Файл: " << file.string() << "\nОстановка: Ctrl+C\n" << std::flush;
-        pid_t opener = browser ? open_browser(url) : -1;
-        if (browser && opener < 0) std::cerr << "Откройте URL выше в браузере.\n";
-        while (running) {
-            if (opener > 0) {
-                int status = 0;
-                if (waitpid(opener, &status, WNOHANG) == opener) {
-                    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-                        std::cerr << "Откройте URL выше в браузере.\n";
-                    opener = -1;
-                }
+        auto serve = [&] {
+            while (running) {
+                pollfd ready{server.fd, POLLIN, 0};
+                const int result = ::poll(&ready, 1, 200);
+                if (result < 0 && errno == EINTR) continue;
+                if (result < 0) throw std::runtime_error("Ошибка ожидания соединения");
+                if (!result || !(ready.revents & POLLIN)) continue;
+                Socket client(::accept(server.fd, nullptr, nullptr));
+                if (client.fd < 0) continue;
+                timeval timeout{1, 0};
+                ::setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                ::setsockopt(client.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+                doc.serve(client.fd, host);
             }
-            pollfd ready{server.fd, POLLIN, 0};
-            const int result = ::poll(&ready, 1, 200);
-            if (result < 0 && errno == EINTR) continue;
-            if (result < 0) throw std::runtime_error("Ошибка ожидания соединения");
-            if (!result || !(ready.revents & POLLIN)) continue;
-            Socket client(::accept(server.fd, nullptr, nullptr));
-            if (client.fd < 0) continue;
-            timeval timeout{1, 0};
-            ::setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-            ::setsockopt(client.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-            doc.serve(client.fd, host);
+        };
+        if (!window) {
+            serve();
+        } else {
+            std::exception_ptr server_error;
+            std::thread worker([&] {
+                try { serve(); }
+                catch (...) { server_error = std::current_exception(); running = false; }
+            });
+            try {
+                run_native_window(url, file.filename().string() + " — mdread", [] { return !running.load(); });
+            } catch (...) {
+                running = false;
+                worker.join();
+                throw;
+            }
+            running = false;
+            worker.join();
+            if (server_error) std::rethrow_exception(server_error);
         }
         return 0;
     } catch (const std::exception& error) {
