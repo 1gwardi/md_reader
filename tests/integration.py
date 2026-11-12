@@ -294,7 +294,7 @@ class DirectoryTest(ServerCase):
                     '/__mdread/content?path=%2Fetc/passwd.md'):
             self.assertEqual(self.request(url)[0], 403, url)
         for url in ('/__mdread/content', '/__mdread/content?path=secret.txt', '/files/secret.txt',
-                    '/files/missing.md', '/__mdread/list?path=missing', '/__mdread/list?path=README.md'):
+                    '/__mdread/list?path=README.md'):
             self.assertEqual(self.request(url)[0], 404, url)
         with tempfile.TemporaryDirectory() as outside:
             secret = Path(outside) / 'secret.md'
@@ -303,9 +303,140 @@ class DirectoryTest(ServerCase):
             (self.root / 'outside-dir').symlink_to(outside, target_is_directory=True)
             self.assertNotIn('outside.md', [entry['name'] for entry in self.listing()])
             self.assertNotIn('outside-dir', [entry['name'] for entry in self.listing()])
-            self.assertEqual(self.request('/files/outside.md')[0], 403)
+            self.assertEqual(self.request('/files/outside.md')[0], 200)  # shell remains usable
             self.assertEqual(self.file_content('outside.md')[0], 403)
             self.assertEqual(self.request('/__mdread/list?path=outside-dir')[0], 403)
+
+    def test_resource_versions_and_error_shell(self):
+        _, first, _ = self.file_content('README.md')
+        for _ in range(10):
+            self.file_content(self.name)
+            self.assertEqual(self.file_content('README.md', first['ETag'])[0], 304)
+        _, headers, _ = self.request('/__mdread/list')
+        self.assertEqual(self.request('/__mdread/list', {'If-None-Match':headers['ETag']})[0], 304)
+        for name in ('missing.md','big.md'):
+            if name == 'big.md':
+                with (self.root / name).open('wb') as stream: stream.truncate(17*1024*1024)
+            status, _, page = self.request('/files/' + name)
+            self.assertEqual(status, 200)
+            self.assertIn(b'id="refresh"', page)
+            self.assertEqual(self.file_content(name)[0], 503)
+        (self.root / 'big.md').write_text('# Recovered')
+        self.assertEqual(self.file_content('big.md')[0], 200)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root bypasses directory read permissions')
+    def test_content_remains_readable_without_directory_listing_permission(self):
+        self.folder.chmod(0o111)
+        try:
+            self.assertEqual(self.request('/__mdread/list?path=' + quote(self.folder.name))[0], 503)
+            self.assertEqual(self.file_content(self.name)[0], 200)
+        finally: self.folder.chmod(0o755)
+
+    def test_symlink_races_and_special_files(self):
+        import threading
+        with tempfile.TemporaryDirectory() as outside:
+            secret = Path(outside) / 'secret.md'; secret.write_text('EXTERNAL_SECRET')
+            victim = self.root / 'race.md'
+            stop = threading.Event()
+            def swap():
+                while not stop.is_set():
+                    tmp = self.root / 'swap'; tmp.write_text('# safe'); tmp.replace(victim)
+                    link = self.root / 'swaplink'; link.symlink_to(secret); link.replace(victim)
+            thread = threading.Thread(target=swap); thread.start()
+            try:
+                for _ in range(200):
+                    self.assertNotIn(b'EXTERNAL_SECRET', self.file_content('race.md')[2])
+            finally:
+                stop.set(); thread.join()
+            parent = self.root / 'parent'; parent.mkdir(); (parent / 'secret.md').write_text('# local')
+            parked = self.root / 'parked'
+            stop.clear()
+            def swap_parent():
+                while not stop.is_set():
+                    parent.rename(parked)
+                    parent.symlink_to(outside, target_is_directory=True)
+                    parent.unlink(); parked.rename(parent)
+            thread = threading.Thread(target=swap_parent); thread.start()
+            try:
+                for _ in range(100): self.assertNotIn(b'EXTERNAL_SECRET', self.file_content('parent/secret.md')[2])
+            finally:
+                stop.set(); thread.join()
+            os.mkfifo(self.root / 'pipe.md')
+            self.assertEqual(self.file_content('pipe.md')[0], 503)
+
+
+class ResilienceTest(ServerCase):
+    def test_offline_policy(self):
+        process = subprocess.Popen([BINARY, '--offline', '--no-window', str(self.doc)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            ready, _, _ = select.select([process.stdout], [], [], 5)
+            self.assertTrue(ready)
+            url = urlsplit(process.stdout.readline().strip())
+            connection = http.client.HTTPConnection(url.hostname, url.port, timeout=3)
+            try:
+                connection.request('GET', '/'); response = connection.getresponse()
+                policy = response.getheader('Content-Security-Policy'); response.read()
+                self.assertIn("img-src 'self' data:;", policy)
+                self.assertNotIn('https:', policy)
+            finally: connection.close()
+        finally:
+            process.terminate(); process.communicate(timeout=3)
+    def test_single_file_replacement_and_output_budget(self):
+        self.content()
+        with tempfile.TemporaryDirectory() as outside:
+            secret = Path(outside) / 'secret.md'; secret.write_text('EXTERNAL_SECRET')
+            self.doc.unlink(); self.doc.symlink_to(secret)
+            self.assertEqual(self.content()[0], 403)
+            self.doc.unlink(); self.doc.write_text('# Restored')
+            self.assertIn('Restored', json.loads(self.content()[2])['html'])
+        self.doc.write_text('<' * (2 * 1024 * 1024))
+        self.assertEqual(self.content()[0], 503)
+        self.assertEqual(self.request()[0], 200)
+
+    def test_slow_clients_do_not_block_other_requests_or_shutdown(self):
+        import socket, time, threading
+        client = socket.create_connection((self.address.hostname, self.address.port))
+        self.addCleanup(client.close)
+        stopped = threading.Event()
+        def dribble():
+            try:
+                while not stopped.wait(.08): client.sendall(b'x')
+            except OSError: pass
+        thread = threading.Thread(target=dribble); thread.start()
+        try:
+            started = time.monotonic()
+            self.assertEqual(self.request()[0], 200)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.process.send_signal(signal.SIGTERM)
+            self.assertEqual(self.process.wait(timeout=1.5), 0)
+        finally:
+            stopped.set(); thread.join()
+
+    def test_absolute_header_deadline(self):
+        import socket, time, threading
+        with socket.create_connection((self.address.hostname, self.address.port)) as client:
+            stop = threading.Event()
+            def dribble():
+                try:
+                    while not stop.wait(.1): client.sendall(b'x')
+                except OSError: pass
+            thread = threading.Thread(target=dribble); thread.start()
+            try:
+                started = time.monotonic(); client.settimeout(4.5)
+                self.assertEqual(client.recv(1), b'')
+                self.assertLess(time.monotonic()-started, 4.5)
+            finally:
+                stop.set(); thread.join()
+
+    def test_nonreading_client_does_not_block_shutdown(self):
+        import socket, time
+        self.doc.write_text('x' * (3*1024*1024))
+        with socket.create_connection((self.address.hostname, self.address.port)) as client:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            client.sendall(('GET /__mdread/content HTTP/1.1\r\nHost: '+self.address.netloc+'\r\n\r\n').encode())
+            time.sleep(.15)
+            self.assertEqual(self.request()[0], 200)
+            self.process.terminate(); self.assertEqual(self.process.wait(timeout=1.5), 0)
 
 
 if __name__ == '__main__':
