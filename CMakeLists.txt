@@ -74,6 +74,9 @@ if(BUILD_TESTING)
       add_test(NAME native_window COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_window.py"
         "$<TARGET_FILE:mdread>" "$<TARGET_FILE:mdread_window_test>")
       set_tests_properties(native_window PROPERTIES TIMEOUT 40)
+      add_test(NAME math_sample COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/math_corpus.py"
+        "$<TARGET_FILE:mdread>" "$<TARGET_FILE:mdread_window_test>" "${CMAKE_CURRENT_SOURCE_DIR}/examples/formulas.md")
+      set_tests_properties(math_sample PROPERTIES TIMEOUT 30)
     endif()
   endif()
 endif()

@@ -24,8 +24,11 @@ void screenshot(WKWebView* view, NSString* name, void (^done)(NSString*)) {
     }];
 }
 
+#include "math_corpus.hpp"
+
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 2;
+    if (argc == 4 && std::string(argv[3]) == "corpus") return check_math_corpus(argv[1], argv[2]);
     @autoreleasepool {
         struct State {
             int stage = 0;
