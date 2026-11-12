@@ -25,8 +25,10 @@ void screenshot(WKWebView* view, NSString* name, void (^done)(NSString*)) {
 }
 
 #include "math_corpus.hpp"
+#include "review_window.hpp"
 
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[3]) == "review") return check_review_window(argv[1], argv[4]);
     if (argc != 3 && argc != 4) return 2;
     if (argc == 4 && std::string(argv[3]) == "corpus") return check_math_corpus(argv[1], argv[2]);
     @autoreleasepool {
@@ -134,7 +136,7 @@ int main(int argc, char** argv) {
                     output << "<div id=\"updated-html\" style=\"color: rgb(12, 34, 56)\">Updated HTML</div>\n\n"
                               "<img src=\"missing.png\" onerror=\"window.htmlExecuted=true\">\n\n"
                               "<script>window.htmlExecuted=true</script>\n\n";
-                    if (directory) output << "<a href=\"second.md\">Next document</a>\n\n";
+                    if (directory) output << "<a href=\"second.md\" target=\"_blank\">Next document</a>\n\n";
                     for (int i = 0; i < 100; ++i) output << "Paragraph " << i << " preserved for scrolling.\n\n";
                     if (!output) { state->failure = @"Unable to update Markdown fixture"; return; }
                     state->stage = 1;

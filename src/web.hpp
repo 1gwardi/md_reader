@@ -90,6 +90,11 @@ body.resizing-sidebar,body.resizing-sidebar * { cursor:col-resize !important; us
 #directory-list .file-kind { width:20px; height:20px; } #directory-list .entry-description { display:block; }
 main { max-width:800px; margin:28px auto 60px; padding:42px 48px 64px; background:var(--surface); border:1px solid var(--line); border-radius:12px; scroll-margin-top:96px; }
 main:focus { outline:none; }
+main { contain:layout paint; isolation:isolate; position:relative; z-index:0; }
+.math-fallback { color:var(--error); white-space:pre-wrap; }
+.list-pagination { display:flex; align-items:center; justify-content:space-between; padding:10px; font-size:12px; gap:8px; }
+.list-pagination button { border:1px solid var(--line); border-radius:5px; background:var(--surface); color:var(--fg); padding:4px 8px; }
+#listing-notice { color:var(--error); font-size:12px; padding:8px; }
 body[data-reading=false] main { background:transparent; border:0; padding-top:26px; }
 main h1,main h2,main h3,main h4,main h5,main h6 { line-height:1.4; margin:1.6em 0 .7em; font-weight:650; letter-spacing:-.025em; scroll-margin-top:100px; }
 main h1 { font-size:1.95em; } main h2 { font-size:1.4em; border-bottom:1px solid var(--line); padding-bottom:.45em; }
@@ -142,6 +147,11 @@ let lastListing = '';
 let entries = [];
 let refreshTimer;
 let refreshing = false;
+let listingBusy = false, listingChecked = 0, listingRevision = '', listingDelay = 2000;
+let listPage = 0, searchTimer, pollDelay = 600, contentProblem = '', renderProblem = '';
+const listingNotice = document.createElement('div');
+listingNotice.id = 'listing-notice'; listingNotice.setAttribute('role', 'status'); listingNotice.hidden = true;
+if (sidebar) sidebar.before(listingNotice);
 function readSetting(key) { try { return sessionStorage.getItem('mdread-' + key); } catch { return null; } }
 function saveSetting(key, value) { try { sessionStorage.setItem('mdread-' + key, value); } catch {} }
 function setSidebar(hidden) {
@@ -228,7 +238,12 @@ if (directoryMode) {
   toggleFiles.addEventListener('click', () => setSidebar(!document.body.classList.contains('sidebar-hidden')));
   backdrop.addEventListener('click', () => setSidebar(true));
   search.value = readSetting('search:' + folder) ?? '';
-  search.addEventListener('input', () => { saveSetting('search:' + folder, search.value); displayListing(); });
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    const update = () => { listPage = 0; saveSetting('search:' + folder, search.value); displayListing(); };
+    if (entries.length > 200) searchTimer = setTimeout(update, 120);
+    else update();
+  });
   document.addEventListener('keydown', event => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault(); setSidebar(false); search.focus(); search.select();
@@ -288,11 +303,26 @@ function fileList(entries) {
 }
 function displayListing() {
   const query = search.value.trim().toLocaleLowerCase();
-  const filtered = entries.filter(entry => entry.name.toLocaleLowerCase().includes(query));
+  const filtered = entries.filter(entry => entry.searchName.includes(query));
+  listPage = Math.min(listPage, Math.max(0, Math.ceil(filtered.length / 100) - 1));
+  const visible = filtered.slice(listPage * 100, (listPage + 1) * 100);
+  function page() {
+    const wrapper = document.createElement('div'); wrapper.append(fileList(visible));
+    if (filtered.length > 100) {
+      const controls = document.createElement('div'); controls.className = 'list-pagination';
+      const previous = document.createElement('button'); previous.textContent = '←'; previous.setAttribute('aria-label','Предыдущие файлы'); previous.disabled = listPage === 0;
+      previous.onclick = () => { --listPage; displayListing(); };
+      const next = document.createElement('button'); next.textContent = '→'; next.setAttribute('aria-label','Следующие файлы'); next.disabled = (listPage + 1) * 100 >= filtered.length;
+      next.onclick = () => { ++listPage; displayListing(); };
+      const label = document.createElement('span'); label.textContent = (listPage + 1) + ' / ' + Math.ceil(filtered.length / 100);
+      controls.append(previous, label, next); wrapper.append(controls);
+    }
+    return wrapper;
+  }
   const position = explorer.scrollTop;
-  sidebar.replaceChildren(fileList(filtered));
+  sidebar.replaceChildren(page());
   explorer.scrollTop = position;
-  directoryList?.replaceChildren(fileList(filtered));
+  directoryList?.replaceChildren(page());
   const files = filtered.filter(entry => !entry.directory).length;
   fileCount.textContent = 'Файлы: ' + files + ' · Папки: ' + (filtered.length - files);
 }
@@ -317,17 +347,31 @@ function showBreadcrumbs() {
   }
 }
 async function refreshListing(force) {
+  if (listingBusy || (!force && Date.now() - listingChecked < listingDelay)) return;
+  listingBusy = true; listingChecked = Date.now();
+  try {
   const response = await fetch('/__mdread/list?path=' + encodeURIComponent(folder), {
+    headers: listingRevision && !force ? {'If-None-Match':listingRevision} : {},
     cache: 'no-store', signal: AbortSignal.timeout(4000)
   });
+  if (response.status === 304) { listingNotice.hidden = true; listingDelay = 2000; return; }
   const data = await response.json();
   if (!response.ok) throw new Error(data.error);
   const listing = JSON.stringify(data.entries);
   if (force || listing !== lastListing) {
-    entries = data.entries;
+    entries = data.entries.map(entry => ({...entry,searchName:entry.name.toLocaleLowerCase()}));
+    if (!lastListing && selected && !search.value) listPage = Math.floor(Math.max(0, entries.findIndex(entry => entry.path === selected)) / 100);
     displayListing();
     lastListing = listing;
   }
+  listingRevision = response.headers.get('ETag') ?? '';
+  listingDelay = 2000;
+  listingNotice.hidden = true;
+  } catch (error) {
+    listingDelay = Math.min(30000, listingDelay * 2);
+    listingNotice.textContent = 'Не удалось обновить список: ' + error.message;
+    listingNotice.hidden = false;
+  } finally { listingBusy = false; }
 }
 if (directoryMode) showBreadcrumbs();
 // Some Markdown exporters escape subscript markers even inside math. Interpret
@@ -375,15 +419,60 @@ function normalizeMathSource(source) {
   }
   return result;
 }
+
+const yieldUI = () => new Promise(resolve => setTimeout(resolve, 0));
+async function renderEquations(root) {
+  let total = 0, count = 0, outputBytes = 0;
+  for (const equation of root.querySelectorAll('x-equation')) {
+    if (equation.closest('pre,code,kbd,samp')) continue;
+    const source = equation.textContent;
+    try {
+      total += source.length; ++count;
+      if (count > 200 || source.length > 8192 || total > 262144) throw new Error('Превышен лимит сложности формул');
+      let depth = 0;
+      for (let i=0;i<source.length;++i) {
+        if (source[i] === '\\' && /[^a-zA-Z]/.test(source[i+1] ?? '')) { ++i; continue; }
+        if (source[i] === '{' && ++depth > 128) throw new Error('Слишком глубокая вложенность формулы');
+        if (source[i] === '}') --depth;
+      }
+      const markup = katex.renderToString(normalizeMathSource(source), {
+        displayMode:equation.getAttribute('type') === 'display', throwOnError:false,
+        trust:false, strict:'ignore', maxExpand:200, maxSize:20, errorColor:'#b54c42'
+      });
+      if (markup.length > 262144 || outputBytes + markup.length > 2097152) throw new Error('Превышен лимит результата формул');
+      outputBytes += markup.length;
+      // Only trusted KaTeX output with trust:false reaches this HTML sink.
+      equation.innerHTML = markup;
+    } catch (error) {
+      equation.textContent = source; equation.classList.add('math-fallback'); equation.title = error.message;
+    }
+    if (count % 8 === 0) await yieldUI();
+  }
+}
+async function assignHeadingIds(root) {
+  const used = new Set(Array.from(root.querySelectorAll('[id]'), element => element.id));
+  const next = new Map();
+  let count = 0;
+  for (const heading of root.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+    if (heading.id) continue;
+    const base = heading.textContent.toLowerCase().trim().replace(/[^\p{L}\p{N}\p{M}_\s-]/gu,'').replace(/\s/g,'-') || 'section';
+    let suffix = next.get(base) ?? 0;
+    let id = suffix ? `${base}-${suffix}` : base;
+    while (used.has(id)) { ++suffix; id = `${base}-${suffix}`; }
+    next.set(base, suffix + 1); used.add(id); heading.id = id;
+    if (++count % 256 === 0) await yieldUI();
+  }
+}
 async function refresh(force = false) {
   if (refreshing) return;
+  if (document.hidden && !force) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh,10000); return; }
   refreshing = true;
   clearTimeout(refreshTimer);
   refreshButton.disabled = true;
   refreshButton.classList.add('is-refreshing');
   refreshButton.setAttribute('aria-busy', 'true');
   try {
-    if (directoryMode) await refreshListing(force);
+    if (directoryMode) void refreshListing(force);
     if (reading) {
       const response = await fetch(contentURL, {
         headers: revision && !force ? {'If-None-Match': revision} : {},
@@ -393,42 +482,42 @@ async function refresh(force = false) {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error);
         const position = window.scrollY;
+        revision = response.headers.get('ETag');
+        contentProblem = ''; renderProblem = '';
+        try {
+        if (data.html.length > 4194304 || (data.html.match(/</g)?.length ?? 0) > 40000) throw new Error('Документ превышает лимит отображения');
         const content = DOMPurify.sanitize(data.html, {
           USE_PROFILES: {html: true}, RETURN_DOM_FRAGMENT: true,
           ADD_TAGS: ['x-equation'],
+          FORBID_ATTR: ['target'],
           FORBID_TAGS: ['style', 'link', 'meta', 'base']
         });
+        const walker = document.createTreeWalker(content, NodeFilter.SHOW_ALL);
+        let nodes = 0;
+        while (walker.nextNode()) if (++nodes > 60000) throw new Error('Документ содержит слишком много элементов');
+        await renderEquations(content);
+        await assignHeadingIds(content);
+        const rendered = document.createTreeWalker(content, NodeFilter.SHOW_ALL);
+        nodes = 0;
+        while (rendered.nextNode()) if (++nodes > 60000) throw new Error('Результат содержит слишком много элементов');
         article.replaceChildren(content);
-        for (const equation of article.querySelectorAll('x-equation')) {
-          if (equation.closest('pre,code,kbd,samp')) continue;
-          const source = normalizeMathSource(equation.textContent);
-          katex.render(source, equation, {
-            displayMode:equation.getAttribute('type') === 'display',
-            throwOnError:false, trust:false, strict:'ignore', maxExpand:1000, maxSize:20,
-            errorColor:'#b54c42'
-          });
-        }
-        const usedIds = new Set(Array.from(article.querySelectorAll('[id]'), element => element.id));
-        article.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(heading => {
-          if (heading.id) return;
-          const base = heading.textContent.toLowerCase().trim()
-            .replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/\s/g, '-') || 'section';
-          let id = base;
-          for (let suffix = 1; usedIds.has(id); suffix++) id = `${base}-${suffix}`;
-          heading.id = id;
-          usedIds.add(id);
-        });
         revision = response.headers.get('ETag');
         if (loaded) window.scrollTo(0, position);
         else if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
         loaded = true;
-      }
+        pollDelay = 600;
+        } catch (error) { renderProblem = error.message; }
+      } else pollDelay = Math.min(2000, pollDelay * 1.4);
     }
+    contentProblem = renderProblem;
+    if (contentProblem) throw new Error(contentProblem);
     status.textContent = 'Автообновление';
     status.title = 'Изменения файла появляются автоматически';
     status.removeAttribute('data-error');
     notice.hidden = true;
   } catch (error) {
+    contentProblem = error.message;
+    pollDelay = Math.min(5000, pollDelay * 1.5);
     status.textContent = 'Не удалось обновить';
     status.title = error.message;
     status.setAttribute('data-error', '');
@@ -439,8 +528,9 @@ async function refresh(force = false) {
     refreshButton.disabled = false;
     refreshButton.classList.remove('is-refreshing');
     refreshButton.removeAttribute('aria-busy');
-    refreshTimer = setTimeout(refresh, 600);
+    refreshTimer = setTimeout(refresh, document.hidden ? 10000 : pollDelay);
   }
 }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(refreshTimer); void refresh(); } });
 refresh();
 )JS";
