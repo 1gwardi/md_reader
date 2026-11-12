@@ -48,6 +48,10 @@ int main(int argc, char** argv) {
             NSWindow* window = NSApp.keyWindow;
             if (!window || ![window.contentView isKindOfClass:WKWebView.class]) return false;
             WKWebView* view = (WKWebView*)window.contentView;
+            if (!view.allowsBackForwardNavigationGestures) {
+                state->failure = @"Native back/forward trackpad gestures are disabled";
+                return true;
+            }
             state->pending = true;
             NSString* script;
             switch (state->stage) {
